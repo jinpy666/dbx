@@ -15,6 +15,7 @@ CLAUDE.md
 
 # Build output
 dist/
+.dbx-daily-build-state
 coverage/
 /target/
 vendor/wry/target/
@@ -105,3 +106,4 @@ dbx-devtest-connections.json
 
 # Real database integration credentials (see docs/TEST_ENVIRONMENTS.md)
 /docs/TEST_ENVIRONMENTS.md
+.mimosa/

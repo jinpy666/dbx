@@ -139,9 +139,12 @@ export function pluginConnectionFormValues(contribution: PluginConnectionProvide
                 : binding === "database"
                   ? config.database
                   : binding === "secret"
-                    ? secrets[field.key]
+                    ? (secrets[field.key] ?? externalConfig[field.key])
                     : externalConfig[field.key];
-    if (isPluginFormFieldValue(value)) values[field.key] = value;
+    // Port 0 is the stored representation of an optional, automatic port.
+    // Keep that input empty on reopen so its protocol-default hint remains visible.
+    if (binding === "port" && value === 0 && field.default === undefined) delete values[field.key];
+    else if (isPluginFormFieldValue(value)) values[field.key] = value;
   }
   return values;
 }
@@ -182,6 +185,9 @@ export function buildPluginConnectionConfig(pluginId: string, contribution: Plug
       if (value === undefined) delete externalConfig[field.key];
       else externalConfig[field.key] = value;
     } else if (binding === "secret") {
+      // A plugin may migrate a formerly config-bound field to secret binding.
+      // Load its legacy value above, then remove the plaintext copy on save.
+      delete externalConfig[field.key];
       if (value === undefined || value === "") delete connectionSecrets[field.key];
       else connectionSecrets[field.key] = String(value);
     } else if (binding === "name") {
