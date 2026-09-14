@@ -175,6 +175,7 @@ export function buildPluginConnectionConfig(pluginId: string, contribution: Plug
     idle_timeout_secs: existing?.idle_timeout_secs || 60,
     keepalive_interval_secs: existing?.keepalive_interval_secs || 30,
     read_only: existing?.read_only || false,
+    save_password: existing?.save_password !== false,
     is_production: existing?.is_production || false,
     production_databases: existing?.production_databases || [],
   };

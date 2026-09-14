@@ -1379,10 +1379,6 @@ async fn handle_call_plugin_tool(
     if route_terminal {
         let _ = app.emit("mcp-open-connection-workbench", serde_json::json!({ "connection_id": config.id }));
     }
-    eprintln!(
-        "[mcp-bridge] /call-plugin-tool connection={} plugin={} tool={} terminal_routed={}",
-        config.id, plugin_id, req.tool, route_terminal
-    );
     let lifecycle = match state.plugin_host.connection_params_standalone(&config) {
         Ok(l) => l,
         Err(e) => {
@@ -1491,7 +1487,6 @@ async fn handle_list_plugin_connections(state: &Arc<AppState>, body: &str, strea
         }
     };
     let connections = plugin_connection_summaries(&configs, req.plugin_id.trim());
-    eprintln!("[mcp-bridge] /list-plugin-connections plugin={} -> {} connections", req.plugin_id, connections.len());
     respond_json(stream, &serde_json::json!({ "connections": connections })).await;
 }
 

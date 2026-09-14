@@ -283,11 +283,8 @@ pub async fn invoke_plugin(
     params: serde_json::Value,
     timeout_ms: Option<u64>,
 ) -> Result<serde_json::Value, String> {
-    eprintln!("[plugin-trace] invoke_plugin {plugin_id} {method} timeout_ms={timeout_ms:?}");
     let timeout = timeout_ms.map(|milliseconds| Duration::from_millis(milliseconds.clamp(1, 120_000)));
-    let result = state.plugin_host.invoke(&plugin_id, &method, params, None, timeout).await;
-    eprintln!("[plugin-trace] invoke_plugin {plugin_id} {method} -> {}", if result.is_ok() { "ok" } else { "err" });
-    result
+    state.plugin_host.invoke(&plugin_id, &method, params, None, timeout).await
 }
 
 #[tauri::command]
@@ -297,12 +294,6 @@ pub async fn invoke_plugin_connection_action(
     action_id: String,
 ) -> Result<PluginConnectionActionResult, String> {
     state.invoke_plugin_connection_action(config, &action_id).await
-}
-
-#[tauri::command]
-pub async fn plugin_trace(message: String) -> Result<(), String> {
-    eprintln!("[webview-trace] {message}");
-    Ok(())
 }
 
 #[tauri::command]

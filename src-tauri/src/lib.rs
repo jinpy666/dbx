@@ -1857,7 +1857,6 @@ pub fn run() {
             commands::plugins::list_active_plugins,
             commands::plugins::stop_plugin,
             commands::plugins::invoke_plugin,
-            commands::plugins::plugin_trace,
             commands::plugins::invoke_plugin_connection_action,
             commands::plugins::notify_plugin,
             commands::plugins::send_plugin_binary,

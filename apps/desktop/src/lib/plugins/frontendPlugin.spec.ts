@@ -61,6 +61,15 @@ describe("FrontendPluginRegistry", () => {
     expect(pluginConnectionFormValues(provider, explicit).port).toBe(1636);
   });
 
+  it("preserves the save-password preference for plugin connections", () => {
+    const provider = connectionProvider({ fields: [] });
+    const defaultConfig = buildPluginConnectionConfig("example.plugin", provider, {});
+    expect(defaultConfig.save_password).toBe(true);
+
+    const transient = buildPluginConnectionConfig("example.plugin", provider, {}, { ...defaultConfig, save_password: false });
+    expect(transient.save_password).toBe(false);
+  });
+
   it("round-trips plugin connection provider picker values", () => {
     const value = pluginConnectionProviderOptionValue("example/plugin", "ssh:main");
     expect(parsePluginConnectionProviderOptionValue(value)).toEqual({ pluginId: "example/plugin", providerId: "ssh:main" });

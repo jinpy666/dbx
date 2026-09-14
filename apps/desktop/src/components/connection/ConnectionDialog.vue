@@ -2492,10 +2492,6 @@ function applyProfile(val: string, preserveConnectionFields = false) {
     if (profile.type === "zookeeper") {
       form.value.database = undefined;
       form.value.connection_string = "";
-      form.value.ssl = false;
-      form.value.ca_cert_path = "";
-      form.value.client_cert_path = "";
-      form.value.client_key_path = "";
     }
     if (profile.type === "nacos") {
       resetNacosFields();
@@ -3176,6 +3172,7 @@ const tlsCapableDatabaseTypes = new Set<DatabaseType>([
   "influxdb",
   "victoriametrics",
   "cassandra",
+  "zookeeper",
 ]);
 const supportsTlsToggle = computed(() => tlsCapableDatabaseTypes.has(form.value.db_type));
 const supportsCaCertificatePath = computed(() => form.value.db_type === "clickhouse" || form.value.db_type === "victoriametrics");
@@ -4420,7 +4417,6 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
       config.port = firstEndpoint.port;
     }
     config.database = undefined;
-    config.ssl = false;
   }
   if (config.db_type === "etcd") {
     config.etcd_endpoints = normalizeEndpointLines(config.etcd_endpoints || "");
@@ -4435,12 +4431,19 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     if ((config.client_cert_path && !config.client_key_path) || (!config.client_cert_path && config.client_key_path)) {
       throw new Error(t("connection.etcdClientCertPairRequired"));
     }
+  } else if (config.db_type === "zookeeper") {
+    config.etcd_endpoints = undefined;
+    config.client_cert_path = config.client_cert_path?.trim() || "";
+    config.client_key_path = config.client_key_path?.trim() || "";
+    if ((config.client_cert_path && !config.client_key_path) || (!config.client_cert_path && config.client_key_path)) {
+      throw new Error(t("connection.etcdClientCertPairRequired"));
+    }
   } else if (form.value.db_type !== "consul") {
     config.etcd_endpoints = undefined;
     config.client_cert_path = undefined;
     config.client_key_path = undefined;
   }
-  if (config.db_type !== "mysql" && config.db_type !== "clickhouse" && config.db_type !== "etcd" && config.db_type !== "consul" && config.db_type !== "starrocks" && config.db_type !== "mongodb" && config.db_type !== "victoriametrics") {
+  if (config.db_type !== "mysql" && config.db_type !== "clickhouse" && config.db_type !== "etcd" && config.db_type !== "consul" && config.db_type !== "starrocks" && config.db_type !== "mongodb" && config.db_type !== "victoriametrics" && config.db_type !== "zookeeper") {
     config.ca_cert_path = undefined;
   } else {
     config.ca_cert_path = config.ca_cert_path?.trim() || "";
@@ -8391,7 +8394,7 @@ function openExternalUrl(url: string) {
                   </label>
                 </div>
 
-                <template v-if="form.db_type === 'etcd' || form.db_type === 'consul'">
+                <template v-if="form.db_type === 'etcd' || form.db_type === 'consul' || form.db_type === 'zookeeper'">
                   <div class="grid grid-cols-4 items-start gap-4">
                     <Label :class="connectionLabelSmallPaddedClass">
                       <span class="inline-flex items-center justify-end gap-1">

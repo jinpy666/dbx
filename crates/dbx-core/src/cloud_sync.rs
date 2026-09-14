@@ -1012,14 +1012,6 @@ async fn build_sensitive_payload(
         if config.save_password {
             push_secret(&mut connection_secrets, &config.id, "password", &config.password);
         }
-        for (key, secret) in &config.connection_secrets {
-            push_secret(
-                &mut connection_secrets,
-                &config.id,
-                &format!("{PLUGIN_CONNECTION_SECRET_PREFIX}{key}"),
-                secret,
-            );
-        }
         push_secret(&mut connection_secrets, &config.id, "init_script", config.init_script.as_deref().unwrap_or(""));
         for (index, layer) in config.transport_layers.iter().enumerate() {
             match layer {
@@ -1066,9 +1058,6 @@ async fn build_sensitive_payload(
             for (key, secret) in &config.connection_secrets {
                 push_secret(&mut connection_secrets, &config.id, &plugin_connection_secret_key(key)?, secret);
             }
-        }
-        for (key, secret) in &config.connection_secrets {
-            push_secret(&mut connection_secrets, &config.id, &plugin_connection_secret_key(key)?, secret);
         }
     }
 
@@ -2263,7 +2252,7 @@ mod tests {
         assert!(config.redis_sentinel_password.is_empty());
         assert!(config.connection_string.is_none());
         assert!(config.init_script.is_none());
-        assert_eq!(config.connection_secrets.get("api_token").map(String::as_str), Some(""));
+        assert_eq!(config.connection_secrets.get("api_token").map(String::as_str), None);
         let public_json = serde_json::to_string(&config).unwrap();
         assert!(!public_json.contains("token-value"));
         assert!(!public_json.contains("plugin-secret"));

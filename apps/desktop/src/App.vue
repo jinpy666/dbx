@@ -1334,7 +1334,6 @@ watch(
     }
     if (id) newQueryContextSource.value = "tab";
     if (id) activateQuerySurface();
-    if (id) activateQuerySurface();
     else if (previousId) activateOpenSpecialPageFallback();
     if (id && pluginCenterActive.value) pluginCenterActive.value = false;
     const tab = id ? queryStore.tabs.find((candidate) => candidate.id === id) : undefined;
@@ -3897,7 +3896,7 @@ onUnmounted(() => {
                        yields the layout (display:none) while a plugin tab is
                        active, or both flex-1 siblings would split the column. -->
                 <div v-for="workbenchTab in mountedPluginWorkbenchTabs" :key="workbenchTab.id" v-show="activeTab && workbenchTab.id === activeTab.id" class="flex min-h-0 flex-1 flex-col">
-                  <PluginWorkbenchTab :plugin-id="workbenchTab.pluginWorkbench!.pluginId" :contribution-id="workbenchTab.pluginWorkbench!.contributionId" :context="workbenchTab.pluginWorkbench!.context" />
+                  <PluginWorkbenchTab :plugin-id="workbenchTab.pluginWorkbench!.pluginId" :contribution-id="workbenchTab.pluginWorkbench!.contributionId" :context="workbenchTab.pluginWorkbench!.context" @close-tab="queryStore.closeTab(workbenchTab.id)" />
                 </div>
               </div>
             </div>

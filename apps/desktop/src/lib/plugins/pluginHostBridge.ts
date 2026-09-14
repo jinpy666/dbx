@@ -221,7 +221,7 @@ export function pluginSandboxDocument(html: string, permissions?: readonly strin
   const networkOrigins = pluginNetworkOrigins(permissions);
   const connectSrc = networkOrigins.length > 0 ? `connect-src ${networkOrigins.join(" ")};` : "connect-src 'none';";
   const csp = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' blob:; style-src 'unsafe-inline' blob:; img-src data: blob:; font-src data: blob:; ${connectSrc} media-src data: blob:;">`;
-  const sdk = `<script>${pluginSdkSource()}</script>`;
+  const sdk = `<script>${pluginSdkSource(theme)}</script>`;
   const uiKit = `<style>${pluginUiKitCss()}</style>`;
   // Placed after the uiKit so the boot `color-scheme` wins the cascade: the
   // bridge init message (and the SDK's applyTheme) only runs once the iframe
@@ -329,7 +329,14 @@ body {
 `.trim();
 }
 
-export function pluginSdkSource(): string {
+export function pluginSdkSource(initialTheme?: PluginBridgeTheme): string {
+  const safeTokens = Object.fromEntries(Object.entries(initialTheme?.tokens || {}).filter(([name, value]) => /^--[a-z0-9-]+$/i.test(name) && typeof value === "string" && !!value.trim() && /^[^"{}<>;]*$/.test(value)));
+  const safeInitialTheme = initialTheme && (initialTheme.appearance === "dark" || initialTheme.appearance === "light") ? { appearance: initialTheme.appearance, tokens: safeTokens } : null;
+  const serializedInitialTheme = JSON.stringify(safeInitialTheme)
+    .replace(/</g, "\\u003c")
+    .replace(/>/g, "\\u003e")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
   return `(() => {
     const pending = new Map();
     const listeners = { event: new Set(), binary: new Set(), init: new Set(), context: new Set() };
@@ -338,17 +345,21 @@ export function pluginSdkSource(): string {
     let locale = 'en';
     let theme;
     let resolveReady;
+    const initialTheme = ${serializedInitialTheme};
     const applyTheme = (value) => {
       if (!value || typeof value !== 'object') return;
       theme = value;
+      const theme = value;
       const root = document.documentElement;
-      root.dataset.dbxTheme = value.appearance === 'dark' ? 'dark' : 'light';
+      root.dataset.dbxTheme = theme.appearance === "dark" ? "dark" : "light";
+      root.style.colorScheme = theme.appearance === "dark" ? "dark" : "light";
       const tokens = value.tokens && typeof value.tokens === 'object' ? value.tokens : {};
       for (const [name, tokenValue] of Object.entries(tokens)) {
         if (/^--[a-z0-9-]+$/i.test(name) && typeof tokenValue === 'string') root.style.setProperty(name, tokenValue);
       }
     };
     const ready = new Promise((resolve) => { resolveReady = resolve; });
+    if (initialTheme) applyTheme(initialTheme);
     // Plugin UIs routinely hand reactive state (Vue Proxy arrays/objects)
     // straight to invoke(); postMessage cannot structured-clone a Proxy and
     // WebKit rejects with "The object can not be cloned.". Mirror the host's
@@ -379,6 +390,56 @@ export function pluginSdkSource(): string {
       for (const byte of bytes) binary += String.fromCharCode(byte);
       return btoa(binary);
     };
+    const stream = async (method, params = {}, options = {}) => {
+      const streamId = options.streamId || (globalThis.crypto?.randomUUID?.() || 'stream-' + Date.now() + '-' + (++sequence));
+      const closeMethod = options.closeMethod || 'filesystem/stream/close';
+      let removeListener;
+      let closeRequested = false;
+      let resolveOpen;
+      let rejectOpen;
+      const metadata = {};
+      const opened = new Promise((resolve, reject) => { resolveOpen = resolve; rejectOpen = reject; });
+      const readable = new ReadableStream({
+        start(controller) {
+          const onEvent = (message) => {
+            if (message?.method !== 'host.stream.chunk' && message?.method !== 'host.stream.end' && message?.method !== 'host.stream.error') return;
+            const event = message.params || {};
+            if (event.streamId !== streamId) return;
+            if (message.method === 'host.stream.chunk') {
+              try { controller.enqueue(decode(event.dataBase64 || '')); } catch (error) { controller.error(error); }
+              return;
+            }
+            removeListener?.();
+            removeListener = undefined;
+            if (message.method === 'host.stream.error') {
+              const error = new Error(event.message || 'Plugin stream failed');
+              rejectOpen(error);
+              controller.error(error);
+            } else {
+              Object.assign(metadata, event);
+              controller.close();
+            }
+          };
+          removeListener = () => listeners.event.delete(onEvent);
+          listeners.event.add(onEvent);
+          request('backend.invoke', { method, params: { ...(params || {}), streamId }, timeoutMs: options.timeoutMs }).then(resolveOpen, (error) => {
+            removeListener?.();
+            removeListener = undefined;
+            rejectOpen(error);
+            controller.error(error);
+          });
+        },
+        cancel() {
+          removeListener?.();
+          removeListener = undefined;
+          if (closeRequested) return undefined;
+          closeRequested = true;
+          return request('backend.invoke', { method: closeMethod, params: { streamId } }).catch(() => undefined);
+        },
+      });
+      Object.assign(metadata, await opened);
+      return { stream: readable, metadata };
+    };
     window.dbxPlugin = Object.freeze({
       ready,
       get context() { return context; },
@@ -386,6 +447,7 @@ export function pluginSdkSource(): string {
       get theme() { return theme; },
       request,
       invoke: (method, params, options = {}) => request('backend.invoke', { method, params, timeoutMs: options.timeoutMs }),
+      stream,
       notify: (method, params) => request('backend.notify', { method, params }),
       sendBinary: (channel, data) => {
         if (typeof data === 'string') return request('backend.sendBinary', { channel, dataBase64: data });
