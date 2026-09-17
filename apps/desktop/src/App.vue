@@ -121,7 +121,7 @@ import type { DriverStoreFocus, DriverStoreTab } from "@/lib/connection/agentDri
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { apiUrl, webPath } from "@/lib/common/webPath";
 import { shouldBlockAppNativeSelectAll } from "@/lib/common/clipboard";
-import { APP_FONT_SANS_CSS_VAR, DATA_GRID_FONT_FAMILY_CSS_VAR, DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY } from "@/lib/app/appFonts";
+import { APP_FONT_SANS_CSS_VAR, DATA_GRID_FONT_FAMILY_CSS_VAR, DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_MONO_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY, FONT_MONO_CSS_VAR } from "@/lib/app/appFonts";
 import { DATA_GRID_TYPE_COLOR_KEYS, dataGridTypeColorCssVar, resolveActiveDataGridTypeColors } from "@/lib/dataGrid/dataGridTypeColorScheme";
 import { rankSavedSqlHistory } from "@/lib/savedSql/savedSqlHistory";
 import { useUiFontFamilyPreview } from "@/composables/useUiFontFamilyPreview";
@@ -209,7 +209,7 @@ connectionStore.setBeforeConnectHandler(async (config) => {
   }
 });
 const { message: toastMessage, visible: toastVisible, action: toastAction, toast } = useToast();
-const { isDark, themeMode, applyTheme, setThemeMode } = useTheme();
+const { isDark, themeMode, applyTheme, setThemeMode, bumpThemeRevision } = useTheme();
 const { activeCount: activeBackgroundTaskCount } = useExportTracker();
 const trackedUpdateTaskCount = computed(() => countActiveUpdateBlockingTasks(activeBackgroundTaskCount.value, queryStore.tabs));
 const {
@@ -1286,6 +1286,13 @@ function applyUiFontFamily(fontFamily: string) {
   document.body.style.fontFamily = `var(${APP_FONT_SANS_CSS_VAR}, ${DEFAULT_UI_FONT_FAMILY})`;
 }
 
+// Mirrors the editor font onto the global mono token so host mono surfaces and
+// plugin sandboxes (via the plugin bridge's token push) follow the same setting.
+function applyMonoFontFamily(fontFamily: string) {
+  if (typeof document === "undefined") return;
+  document.documentElement.style.setProperty(FONT_MONO_CSS_VAR, fontFamily || DEFAULT_MONO_FONT_FAMILY);
+}
+
 function applyDataGridFontFamily(fontFamily: string) {
   if (typeof document === "undefined") return;
   document.documentElement.style.setProperty(DATA_GRID_FONT_FAMILY_CSS_VAR, fontFamily || DEFAULT_DATA_GRID_FONT_FAMILY);
@@ -1373,11 +1380,17 @@ watch(
 watch(
   [() => settingsStore.editorSettings.uiFontFamily, uiFontFamilyPreview],
   ([fontFamily, preview]) => {
-    if (preview) {
-      applyUiFontFamily(preview);
-      return;
-    }
-    applyUiFontFamily(fontFamily);
+    applyUiFontFamily(preview || fontFamily);
+    bumpThemeRevision();
+  },
+  { immediate: true },
+);
+
+watch(
+  () => settingsStore.editorSettings.fontFamily,
+  (fontFamily) => {
+    applyMonoFontFamily(fontFamily);
+    bumpThemeRevision();
   },
   { immediate: true },
 );

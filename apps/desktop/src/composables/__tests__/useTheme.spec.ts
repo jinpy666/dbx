@@ -175,4 +175,15 @@ describe("useTheme on Linux", () => {
     expect(theme.customUiColors.value.background).toBe("#ffffff");
     expect(theme.customUiColorsDark.value.background).toBe("#1a1b1e");
   });
+
+  it("bumps the theme revision so out-of-band token writers (font settings) reach plugin bridges", async () => {
+    const theme = await loadTheme("light");
+    const before = theme.themeRevision.value;
+
+    theme.bumpThemeRevision();
+
+    expect(theme.themeRevision.value).toBe(before + 1);
+    // No theme classes are touched: this is a pure revision bump.
+    expect(document.documentElement.classList.contains("disable-transitions")).toBe(false);
+  });
 });
