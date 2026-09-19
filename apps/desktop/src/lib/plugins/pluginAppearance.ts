@@ -1,8 +1,11 @@
-// 插件沙箱外观快照：读取 DBX 根节点的设计令牌（随 .dark / 调色板类
-// 实时变化）加编辑器字体设置，组装成插件契约里的 appearance 对象，
-// 供 PluginHostBridge 在 init 下发、主题变化时实时推送。
+// 插件沙箱外观契约与快照工具：PluginAppearance 描述宿主下发的 appearance
+// 对象（1.0 部分下发、1.1 theme 通道只带颜色令牌）；buildPluginAppearance
+// 组装快照，buildPluginEditorAppearance 产出结构化 editor 字段。实际推送
+// 链路在 PluginWorkbenchHost.currentBridgeTheme → PluginHostBridge.updateTheme。
 
 import type { PluginEditorAppearance } from "./pluginHostBridge";
+
+export type { PluginEditorAppearance } from "./pluginHostBridge";
 
 export interface PluginAppearanceColors {
   background: string;
@@ -14,8 +17,6 @@ export interface PluginAppearanceColors {
   border: string;
   destructive: string;
 }
-
-export type { PluginEditorAppearance } from "./pluginHostBridge";
 
 export interface PluginAppearance {
   colorScheme: "light" | "dark";
