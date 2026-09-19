@@ -2,6 +2,8 @@
 // 实时变化）加编辑器字体设置，组装成插件契约里的 appearance 对象，
 // 供 PluginHostBridge 在 init 下发、主题变化时实时推送。
 
+import type { PluginEditorAppearance } from "./pluginHostBridge";
+
 export interface PluginAppearanceColors {
   background: string;
   foreground: string;
@@ -13,15 +15,31 @@ export interface PluginAppearanceColors {
   destructive: string;
 }
 
+export type { PluginEditorAppearance } from "./pluginHostBridge";
+
 export interface PluginAppearance {
   colorScheme: "light" | "dark";
   colors: PluginAppearanceColors;
-  // fontFamily comes from the host's --font-mono token. fontSize is
-  // intentionally NOT delivered: plugin terminals own their size (the SSH
-  // terminal, for one, has its own zoom that persists per workbench), and the
-  // host must never override it.
+  // terminal.fontFamily comes from the host's --font-mono token. It is a
+  // mirror of the editor font for read-only following; terminal.fontSize is
+  // NOT delivered and stays plugin-owned (the SSH terminal, for one, has its
+  // own zoom that persists per workbench). The full editor settings — family,
+  // size and SQL syntax theme — are delivered structured as `editor`.
   terminal: { fontFamily: string; fontSize: number };
   ui?: { fontFamily: string };
+  editor?: PluginEditorAppearance;
+}
+
+/** Structured editor appearance for the bridge theme: SQL editor settings that
+ * have no CSS-token carrier (the size is a number, the syntax theme an id).
+ * Returns undefined unless every field is usable, so snapshots for hosts with
+ * incomplete settings stay unchanged instead of carrying partial data. */
+export function buildPluginEditorAppearance(editor: { fontFamily?: string; fontSize?: number; theme?: string }): PluginEditorAppearance | undefined {
+  const fontFamily = typeof editor.fontFamily === "string" && editor.fontFamily.trim() ? editor.fontFamily : undefined;
+  const fontSize = typeof editor.fontSize === "number" && Number.isFinite(editor.fontSize) && editor.fontSize > 0 ? editor.fontSize : undefined;
+  const theme = typeof editor.theme === "string" && editor.theme.trim() ? editor.theme : undefined;
+  if (!fontFamily || fontSize === undefined || !theme) return undefined;
+  return { fontFamily, fontSize, theme };
 }
 
 // camelCase 字段 → DBX globals.css 的 CSS 令牌名。
