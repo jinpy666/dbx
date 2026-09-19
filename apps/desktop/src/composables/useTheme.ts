@@ -70,6 +70,32 @@ function bumpThemeRevision() {
   themeRevision.value += 1;
 }
 
+let pendingBumpTimer: ReturnType<typeof setTimeout> | undefined;
+
+// The one sanctioned way to write a design token onto the root outside
+// applyTheme(): writes the inline override AND bumps the theme revision.
+// Writing root tokens directly (documentElement.style.setProperty) skips the
+// bump and open plugin bridges keep stale tokens — always go through here.
+// `debounceMs` coalesces rapid writes (font-family preview keystrokes) into
+// one bump; an immediate write afterwards supersedes the pending one.
+function writeRootToken(cssVar: string, value: string, options?: { debounceMs?: number }) {
+  if (typeof document === "undefined") return;
+  document.documentElement.style.setProperty(cssVar, value);
+  if (options?.debounceMs) {
+    if (pendingBumpTimer) clearTimeout(pendingBumpTimer);
+    pendingBumpTimer = setTimeout(() => {
+      pendingBumpTimer = undefined;
+      bumpThemeRevision();
+    }, options.debounceMs);
+    return;
+  }
+  if (pendingBumpTimer) {
+    clearTimeout(pendingBumpTimer);
+    pendingBumpTimer = undefined;
+  }
+  bumpThemeRevision();
+}
+
 let mediaQuery: MediaQueryList | null = null;
 let isListeningForSystemTheme = false;
 let cachedTauriWindow: typeof import("@tauri-apps/api/window") | null = null;
@@ -228,6 +254,7 @@ export function useTheme() {
     activeCustomUiColors,
     themeRevision,
     bumpThemeRevision,
+    writeRootToken,
     cornerStyle,
     applyTheme,
     setThemeMode,

@@ -16,6 +16,10 @@ export interface PluginAppearanceColors {
 export interface PluginAppearance {
   colorScheme: "light" | "dark";
   colors: PluginAppearanceColors;
+  // fontFamily comes from the host's --font-mono token. fontSize is
+  // intentionally NOT delivered: plugin terminals own their size (the SSH
+  // terminal, for one, has its own zoom that persists per workbench), and the
+  // host must never override it.
   terminal: { fontFamily: string; fontSize: number };
   ui?: { fontFamily: string };
 }

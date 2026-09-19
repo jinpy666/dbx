@@ -216,7 +216,7 @@ connectionStore.setBeforeConnectHandler(async (config) => {
   }
 });
 const { message: toastMessage, visible: toastVisible, action: toastAction, toast } = useToast();
-const { isDark, themeMode, applyTheme, setThemeMode, bumpThemeRevision } = useTheme();
+const { isDark, themeMode, applyTheme, setThemeMode, writeRootToken } = useTheme();
 const { activeCount: activeBackgroundTaskCount } = useExportTracker();
 const trackedUpdateTaskCount = computed(() => countActiveUpdateBlockingTasks(activeBackgroundTaskCount.value, queryStore.tabs));
 const {
@@ -1395,24 +1395,23 @@ function resetUiZoom() {
   showUiScaleToast();
 }
 
-function applyUiFontFamily(fontFamily: string) {
+function applyUiFontFamily(fontFamily: string, options?: { debouncePluginBumpMs?: number }) {
   if (typeof document === "undefined") return;
   const next = fontFamily || DEFAULT_UI_FONT_FAMILY;
   // Override Tailwind's shared sans variable so app chrome and existing UI classes stay in sync.
-  document.documentElement.style.setProperty(APP_FONT_SANS_CSS_VAR, next);
+  // The plugin-facing bump is debounced while the preview slider/keystrokes fire.
+  writeRootToken(APP_FONT_SANS_CSS_VAR, next, options?.debouncePluginBumpMs ? { debounceMs: options.debouncePluginBumpMs } : undefined);
   document.body.style.fontFamily = `var(${APP_FONT_SANS_CSS_VAR}, ${DEFAULT_UI_FONT_FAMILY})`;
 }
 
 // Mirrors the editor font onto the global mono token so host mono surfaces and
 // plugin sandboxes (via the plugin bridge's token push) follow the same setting.
 function applyMonoFontFamily(fontFamily: string) {
-  if (typeof document === "undefined") return;
-  document.documentElement.style.setProperty(FONT_MONO_CSS_VAR, fontFamily || DEFAULT_MONO_FONT_FAMILY);
+  writeRootToken(FONT_MONO_CSS_VAR, fontFamily || DEFAULT_MONO_FONT_FAMILY);
 }
 
 function applyDataGridFontFamily(fontFamily: string) {
-  if (typeof document === "undefined") return;
-  document.documentElement.style.setProperty(DATA_GRID_FONT_FAMILY_CSS_VAR, fontFamily || DEFAULT_DATA_GRID_FONT_FAMILY);
+  writeRootToken(DATA_GRID_FONT_FAMILY_CSS_VAR, fontFamily || DEFAULT_DATA_GRID_FONT_FAMILY);
 }
 
 // Both grid renderers read these variables, so overriding them here recolors the
@@ -1497,8 +1496,9 @@ watch(
 watch(
   [() => settingsStore.editorSettings.uiFontFamily, uiFontFamilyPreview],
   ([fontFamily, preview]) => {
-    applyUiFontFamily(preview || fontFamily);
-    bumpThemeRevision();
+    // Preview keystrokes write immediately (host feels instant) but coalesce
+    // the plugin-bridge bump; committed changes bump right away.
+    applyUiFontFamily(preview || fontFamily, preview ? { debouncePluginBumpMs: 150 } : undefined);
   },
   { immediate: true },
 );
@@ -1507,7 +1507,6 @@ watch(
   () => settingsStore.editorSettings.fontFamily,
   (fontFamily) => {
     applyMonoFontFamily(fontFamily);
-    bumpThemeRevision();
   },
   { immediate: true },
 );
