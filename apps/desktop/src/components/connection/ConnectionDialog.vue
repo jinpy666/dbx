@@ -4118,6 +4118,13 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     config.color = form.value.color;
     config.transport_layers = form.value.transport_layers || [];
     config.connect_timeout_secs = form.value.connect_timeout_secs;
+    // buildPluginConnectionConfig rebuilds the config from scratch and drops
+    // the timeout inherit flags, so mirror the Advanced-tab radio state the
+    // same way the built-in branch keeps them via the form spread. Kept ahead
+    // of the resolvedPluginConnectTimeout override below, which intentionally
+    // forces connect inheritance off for providers declaring their own
+    // handshake timeout field.
+    config.connect_timeout_inherit = form.value.connect_timeout_inherit;
     if (resolvedPluginConnectTimeout !== undefined) {
       // A provider declaring its own connect_timeout_secs field makes it the
       // single source of truth (declared default or advanced-form value): the
@@ -4129,6 +4136,7 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
       config.connect_timeout_inherit = false;
     }
     config.query_timeout_secs = form.value.query_timeout_secs;
+    config.query_timeout_inherit = form.value.query_timeout_inherit;
     config.idle_timeout_secs = form.value.idle_timeout_secs;
     config.keepalive_interval_secs = form.value.keepalive_interval_secs;
     config.read_only = form.value.read_only;
