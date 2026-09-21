@@ -9,7 +9,8 @@ import type { SqlFileEntry } from "@/lib/backend/api";
 import { getSqlFileFilter, getSqlFileFolderPaths, sqlFileFoldersVersion } from "@/lib/sqlFile/sqlFileFolders";
 import { composeGlobalSearchRoots, getGlobalSearchExtensions, globalSearchSettingsVersion } from "@/lib/globalSearch/globalSearchSettings";
 import { containsHan, pinyinFirstLetters } from "@/lib/common/pinyin";
-import i18n from "@/i18n";
+import { createFrontendPluginRegistry } from "@/lib/plugins/frontendPlugin";
+import i18n, { currentLocale } from "@/i18n";
 
 const REMOTE_SEARCH_DEBOUNCE_MS = 180;
 const REMOTE_SEARCH_MIN_QUERY_LENGTH = 2;
@@ -24,11 +25,11 @@ const INITIAL_SQL_FILE_LIMIT = 20;
 const CONTENT_SEARCH_DEBOUNCE_MS = 200;
 const CONTENT_SEARCH_MAX_RESULTS = 500;
 
-const REMOTE_SEARCH_UNSUPPORTED_TYPES = new Set<ConnectionConfig["db_type"]>(["redis", "mongodb", "elasticsearch", "easysearch", "meilisearch", "qdrant", "milvus", "weaviate", "chromadb", "neo4j", "influxdb", "victoriametrics", "etcd", "zookeeper", "mq", "nacos", "consul"]);
+const REMOTE_SEARCH_UNSUPPORTED_TYPES = new Set<ConnectionConfig["db_type"]>(["redis", "mongodb", "elasticsearch", "easysearch", "meilisearch", "solr", "qdrant", "milvus", "weaviate", "chromadb", "neo4j", "influxdb", "victoriametrics", "etcd", "zookeeper", "mq", "nacos", "consul"]);
 
 export interface QuickOpenItem {
   id: string;
-  type: "connection" | "database" | "schema" | "table" | "view" | "materialized_view" | "procedure" | "function" | "sequence" | "package" | "package-body" | "sql_file" | "sql_library_file" | "content_match" | "plugin_command";
+  type: "connection" | "plugin_workbench" | "database" | "schema" | "table" | "view" | "materialized_view" | "procedure" | "function" | "sequence" | "package" | "package-body" | "sql_file" | "sql_library_file" | "content_match" | "plugin_command";
   label: string;
   description?: string;
   connectionId: string;
@@ -46,14 +47,16 @@ export interface QuickOpenItem {
   matchText?: string; // For content matches: matched slice
   lineText?: string; // For content matches: full matching line
   highlightIndices?: [number, number]; // For content matches: [start, end) chars into lineText to highlight
-  pluginId?: string; // For plugin commands: source plugin id
+  pluginId?: string; // For plugin commands and plugin workbenches: source plugin manifest id
   commandId?: string; // For plugin commands: short id of the command contribution
   pluginName?: string; // For plugin commands: source plugin display name (provenance hint)
+  contributionId?: string; // For plugin workbenches: workbench contribution id
+  pluginIcon?: string; // For plugin workbenches: contribution icon path, falling back to the manifest icon
 }
 
 export interface UseQuickOpenOptions {
   /**
-   * External extra entries (e.g. plugin commandPalette commands): merged into the initial list and the search result pool,
+   * External extra items (e.g. plugin commandPalette commands): merged into the initial list and the search result pool,
    * refreshed by the caller; with no query they are appended after the built-in entries in injection order.
    */
   extraItems?: Ref<QuickOpenItem[]>;
@@ -294,6 +297,8 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
   let sqlFilesLoaded = false;
   let sqlFilesLoadingPromise: Promise<void> | null = null;
   let sqlFilesLoadGeneration = 0;
+  const pluginWorkbenchItems = ref<QuickOpenItem[]>([]);
+  let pluginWorkbenchesLoading = false;
 
   // --- Content search mode (global search of local SQL/text file contents) ---
   const contentMode = ref(false);
@@ -489,6 +494,47 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
     return sqlFileItems.value.slice(0, INITIAL_SQL_FILE_LIMIT);
   });
 
+  /**
+   * Refresh quick-open entries for plugin workbenches that no connection
+   * provider claims. A workbench bound via a provider's `workbench` pointer is
+   * opened through its connection (which quick open already lists as a
+   * connection item with full context), so listing it here would only offer a
+   * contextless dead end. Unclaimed workbenches otherwise have no entry point
+   * outside the Plugin Center's Installed tab.
+   * Re-runs on every dialog open so installs/uninstalls show up without a restart.
+   */
+  async function loadPluginWorkbenches(): Promise<void> {
+    if (pluginWorkbenchesLoading) return;
+    pluginWorkbenchesLoading = true;
+    try {
+      const registry = createFrontendPluginRegistry(await api.listPlugins(), currentLocale());
+      const connectionBound = new Set(
+        registry
+          .listConnectionProviders()
+          .filter((entry) => entry.contribution.workbench)
+          .map((entry) => `${entry.plugin.manifest.id}/${entry.contribution.workbench}`),
+      );
+      pluginWorkbenchItems.value = registry
+        .listWorkbenches()
+        .filter((entry) => !connectionBound.has(`${entry.plugin.manifest.id}/${entry.contribution.id}`))
+        .map((entry) => ({
+          id: `pluginwb-${entry.plugin.manifest.id}-${entry.contribution.id}`,
+          type: "plugin_workbench" as const,
+          label: entry.contribution.label,
+          description: entry.plugin.manifest.name,
+          connectionId: "",
+          pluginId: entry.plugin.manifest.id,
+          contributionId: entry.contribution.id,
+          pluginIcon: entry.contribution.icon || entry.plugin.manifest.icon,
+          searchText: `${entry.plugin.manifest.name} ${entry.contribution.label} ${entry.contribution.id}`,
+        }));
+    } catch {
+      // Plugin listings are best-effort; quick open keeps working without them.
+    } finally {
+      pluginWorkbenchesLoading = false;
+    }
+  }
+
   const allItems = computed((): QuickOpenItem[] => {
     const items: QuickOpenItem[] = [];
     const connections = connectionStore.connections;
@@ -505,6 +551,10 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
         searchText: `${conn.name}`,
       });
     }
+
+    // Standalone plugin workbenches sit right after connections so they stay
+    // reachable in the no-query list before the (much longer) tree items.
+    items.push(...pluginWorkbenchItems.value);
 
     // Add databases and tables from tree nodes
     // Filter tree nodes by connection
@@ -863,6 +913,9 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
       if (normalizedQuery.length > 0 && !sqlFilesLoaded && !sqlFilesLoadingPromise) {
         void loadExternalSqlFiles();
       }
+      if (normalizedQuery.length > 0) {
+        void loadPluginWorkbenches();
+      }
 
       if (normalizedQuery.length < REMOTE_SEARCH_MIN_QUERY_LENGTH) return;
       const contexts = remoteSearchContexts();
@@ -914,20 +967,21 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
 
       const typeOrder = {
         connection: 0,
-        database: 1,
-        schema: 2,
-        table: 3,
-        view: 4,
-        materialized_view: 5,
-        procedure: 6,
-        function: 7,
-        sequence: 8,
-        package: 9,
-        "package-body": 10,
-        sql_library_file: 11,
-        sql_file: 12,
-        content_match: 13,
-        plugin_command: 14,
+        plugin_workbench: 1,
+        database: 2,
+        schema: 3,
+        table: 4,
+        view: 5,
+        materialized_view: 6,
+        procedure: 7,
+        function: 8,
+        sequence: 9,
+        package: 10,
+        "package-body": 11,
+        sql_library_file: 12,
+        sql_file: 13,
+        content_match: 14,
+        plugin_command: 15,
       };
       const typeDifference = typeOrder[a.type] - typeOrder[b.type];
       if (typeDifference !== 0) return typeDifference;
@@ -1029,5 +1083,6 @@ export function useQuickOpen(options: UseQuickOpenOptions = {}) {
     resetSelection,
     setQuery,
     loadExternalSqlFiles,
+    loadPluginWorkbenches,
   };
 }

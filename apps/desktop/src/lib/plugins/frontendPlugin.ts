@@ -15,6 +15,7 @@ import type {
   PluginFormFieldLocalization,
   PluginFormFieldValue,
   PluginManifestLocalization,
+  PluginUiContribution,
   PluginWorkbenchContribution,
 } from "@/types/database";
 import { uuid } from "@/lib/common/utils";
@@ -134,6 +135,17 @@ export class FrontendPluginRegistry {
       }
     }
     return result.sort((left, right) => left.order - right.order || `${left.plugin.manifest.id}.${left.command.id}`.localeCompare(`${right.plugin.manifest.id}.${right.command.id}`));
+  }
+
+  /**
+   * Resolve any contribution the plugin UI entrypoint can render, whichever host
+   * surface opened the tab — a `workbench` opened from the sidebar or a
+   * `result-view` opened from the query-result toolbar. Lookups stay scoped to
+   * the renderable contribution types, so an id owned by a native context menu
+   * or a filesystem provider is not a plugin UI surface.
+   */
+  findUiContribution(pluginId: string, contributionId: string): PluginContributionEntry<PluginUiContribution> | undefined {
+    return [...this.listWorkbenches(), ...this.listResultViews()].find((entry) => entry.plugin.manifest.id === pluginId && entry.contribution.id === contributionId);
   }
 
   private listContributions<T extends PluginContribution["type"]>(type: T): Array<PluginContributionEntry<Extract<PluginContribution, { type: T }>>> {
@@ -370,7 +382,9 @@ function localizeContribution(contribution: PluginContribution, localization: Pl
       label: localizedRequiredText(action.label, localization?.actions?.[action.id]?.label),
       description: localizedOptionalText(action.description, localization?.actions?.[action.id]?.description),
     }));
-  } else if (localized.type === "workbench" || localized.type === "command") {
+  } else if (localized.type === "workbench" || localized.type === "command" || localized.type === "result-view") {
+    // Workbench, command and result-view contributions all resolve their icon
+    // asset path the same way.
     localized.icon = optionalPluginAssetPath(localized.icon);
   }
   return localized;
@@ -416,6 +430,6 @@ function isPluginFormFieldValue(value: unknown): value is PluginFormFieldValue {
   return value === undefined || typeof value === "string" || typeof value === "number" || typeof value === "boolean";
 }
 
-function isRecord(value: unknown): value is Record<string, any> {
+function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

@@ -40,6 +40,40 @@ describe("queryStore openPluginWorkbench reuse", () => {
     expect(tab?.pluginWorkbench?.context).toEqual({ connectionId: "conn-1", workbenchId: "wb-original" });
   });
 
+  it("refreshes a reused result-view context when explicitly requested", () => {
+    const queryStore = useQueryStore();
+
+    const firstId = queryStore.openPluginWorkbench("io.dbx.plan-detective", "result-view", {
+      connectionId: "conn-1",
+      context: { connectionId: "conn-1", sql: "SELECT 1" },
+    });
+    const secondId = queryStore.openPluginWorkbench("io.dbx.plan-detective", "result-view", {
+      connectionId: "conn-1",
+      context: { connectionId: "conn-1", sql: "SELECT 2" },
+      refreshContextOnReuse: true,
+    });
+
+    expect(secondId).toBe(firstId);
+    expect(queryStore.tabs.find((tab) => tab.id === firstId)?.pluginWorkbench?.context).toEqual({ connectionId: "conn-1", sql: "SELECT 2" });
+  });
+
+  it("refreshes a reused result-view result snapshot when explicitly requested", () => {
+    const queryStore = useQueryStore();
+
+    const firstId = queryStore.openPluginWorkbench("io.dbx.plan-detective", "result-view", {
+      connectionId: "conn-1",
+      context: { connectionId: "conn-1", result: { columns: ["id"], rows: [[1]], truncated: false } },
+    });
+    const secondId = queryStore.openPluginWorkbench("io.dbx.plan-detective", "result-view", {
+      connectionId: "conn-1",
+      context: { connectionId: "conn-1", result: { columns: ["id"], rows: [[2]], truncated: false } },
+      refreshContextOnReuse: true,
+    });
+
+    expect(secondId).toBe(firstId);
+    expect(queryStore.tabs.find((tab) => tab.id === firstId)?.pluginWorkbench?.context?.result).toEqual({ columns: ["id"], rows: [[2]], truncated: false });
+  });
+
   it("a different connection still opens its own workbench tab", () => {
     const queryStore = useQueryStore();
 
@@ -94,6 +128,23 @@ describe("queryStore openPluginWorkbench reuse", () => {
     expect(queryStore.groups[0]?.activeTabId).toBe(id);
     // Adoption must not replace the live context (same no-deep-reload rule).
     expect(queryStore.tabs.find((t) => t.id === id)?.pluginWorkbench?.context).toEqual({ connectionId: "conn-1" });
+  });
+
+  it("keeps a result-view tab distinct from the plugin's workbench tab", () => {
+    const queryStore = useQueryStore();
+
+    const workbenchId = queryStore.openPluginWorkbench("io.dbx.ssh", "ssh.main", { title: "SSH server", connectionId: "conn-1", context: { connectionId: "conn-1" } });
+    const resultViewId = queryStore.openPluginWorkbench("io.dbx.ssh", "ssh.erd", {
+      title: "Graph",
+      connectionId: "conn-1",
+      context: { connectionId: "conn-1", sql: "SELECT 1", result: { columns: ["id"], rows: [[1]], truncated: false } },
+    });
+
+    // The tab keeps the entry contribution id: the renderer resolves it as a
+    // result-view, and the sidebar workbench tab is not reused for it.
+    expect(resultViewId).not.toBe(workbenchId);
+    expect(queryStore.tabs.find((tab) => tab.id === resultViewId)?.pluginWorkbench?.contributionId).toBe("ssh.erd");
+    expect(queryStore.tabs.find((tab) => tab.id === resultViewId)?.pluginWorkbench?.context?.result).toEqual({ columns: ["id"], rows: [[1]], truncated: false });
   });
 
   it("numbers same-connection session tabs Termius-style and never backfills", async () => {

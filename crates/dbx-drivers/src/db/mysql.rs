@@ -1,6 +1,6 @@
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use futures::StreamExt;
-use mysql_async::consts::{ColumnFlags, ColumnType};
+use mysql_async::consts::{ColumnFlags, ColumnType, StatusFlags};
 use mysql_async::prelude::*;
 use percent_encoding::percent_decode_str;
 use rust_decimal::Decimal;
@@ -189,6 +189,47 @@ pub struct MySqlQueryDialect {
 pub struct MySqlQueryResult {
     pub result: QueryResult,
     pub large_value_cells: Vec<LargeValueCell>,
+}
+
+/// Result of one MCP fixed-session statement executed through MySQL's text
+/// protocol. The transaction bit comes from the final server OK/EOF packet,
+/// never from SQL text or client-side state inference.
+#[derive(Debug)]
+pub struct MySqlTransactionExecution {
+    pub result: QueryResult,
+    pub in_transaction: bool,
+}
+
+/// Error classification retained by the fixed-session owner. Server errors
+/// are recoverable protocol responses; every other driver error means the
+/// connection state cannot be trusted or replayed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MySqlTransactionError {
+    Server { code: u16, message: String, state: String },
+    Transport(String),
+}
+
+fn transaction_error_from_mysql_error(error: mysql_async::Error) -> MySqlTransactionError {
+    match error {
+        mysql_async::Error::Server(error) => {
+            MySqlTransactionError::Server { code: error.code, message: error.message, state: error.state }
+        }
+        error => MySqlTransactionError::Transport(error.to_string()),
+    }
+}
+
+fn transaction_status_from_last_ok(conn: &mysql_async::Conn) -> Result<bool, MySqlTransactionError> {
+    conn.last_ok_packet()
+        .map(|packet| packet.status_flags().contains(StatusFlags::SERVER_STATUS_IN_TRANS))
+        .ok_or_else(|| MySqlTransactionError::Transport("MySQL did not return a final status packet".to_string()))
+}
+
+/// Read transaction state after a recoverable server ERR packet. mysql_async
+/// intentionally clears the cached OK packet for ERR, so COM_PING is required
+/// to obtain fresh status from the same physical connection.
+pub async fn ping_transaction_status_on_conn(conn: &mut mysql_async::Conn) -> Result<bool, MySqlTransactionError> {
+    conn.ping().await.map_err(transaction_error_from_mysql_error)?;
+    transaction_status_from_last_ok(conn)
 }
 
 impl MySqlQueryResult {
@@ -1264,7 +1305,14 @@ impl MySqlSetupMode {
             // configuration with `@@global.group_concat_max_len`), so the built-in
             // safety default must not overwrite it.
             Self::Standard if !mysql_session_variables_override_group_concat_max_len(url) => {
-                Some(format!("SET SESSION group_concat_max_len = {MYSQL_GROUP_CONCAT_MAX_LEN}"))
+                // GREATEST keeps a server that already raises the global limit
+                // above the built-in floor (for example `SET GLOBAL
+                // group_concat_max_len = 8388608`) from being silently lowered
+                // back to the floor by every new session.
+                Some(format!(
+                    "SET SESSION group_concat_max_len = \
+                     cast(greatest(@@session.group_concat_max_len, {MYSQL_GROUP_CONCAT_MAX_LEN}) as unsigned)"
+                ))
             }
             Self::Standard | Self::Compatible => None,
         }
@@ -1320,14 +1368,25 @@ fn mysql_group_concat_setup_fallback_mode(setup_mode: MySqlSetupMode, error: &st
         || lower.contains("unknown system variable")
         || lower.contains("syntax error")
         || lower.contains("not supported");
+    // SphinxQL / Manticore reject the built-in `group_concat_max_len` setup with a
+    // boolean-typed 1064 error. The quoted token after `near` depends on the exact
+    // statement text, so accept any boolean rejection from SphinxQL that mentions
+    // the variable or the built-in floor value.
     let sphinxql_setup_query_rejected = lower.contains("sphinxql")
         && lower.contains("only 0 and 1 could be used as boolean values")
-        && lower.contains(&format!("near '{MYSQL_GROUP_CONCAT_MAX_LEN}'"));
+        && (lower.contains("group_concat_max_len") || lower.contains(&format!("near '{MYSQL_GROUP_CONCAT_MAX_LEN}'")));
     // Some MySQL gateways omit the variable name and report session-variable
     // changes as a forbidden global-variable operation.
     let gateway_session_variable_rejected =
         lower.contains("error 10192 (hy000)") && lower.contains("set global variables is forbidden");
-    if (lower.contains("group_concat_max_len") && setup_query_rejected)
+    // Error echoes of the floor statement always carry the variable name — a
+    // full-statement echo contains it verbatim, and a token quote like
+    // `near 'cast(greatest(...)'` spans the rest of the statement after the
+    // failing token, so the name is still present. Matching on the name alone
+    // keeps user-supplied `sessionVariables` that merely contain `cast(` from
+    // triggering a spurious Standard→Compatible retry.
+    let floor_statement_rejected = lower.contains("group_concat_max_len");
+    if (floor_statement_rejected && setup_query_rejected)
         || sphinxql_setup_query_rejected
         || gateway_session_variable_rejected
     {
@@ -1537,9 +1596,11 @@ fn mysql_setup_queries_for_database_with_mode(
     }
     queries.push(format!("SET NAMES {charset}"));
     // MySQL defaults group_concat_max_len to 1024, which silently truncates
-    // GROUP_CONCAT results. Skip it for MySQL protocol-compatible databases
-    // such as old StarRocks versions that reject unknown MySQL variables, and
-    // for connections that configure the variable themselves.
+    // GROUP_CONCAT results. Only raise the session value to the built-in floor:
+    // a server whose global value is already higher keeps its own limit. Skip
+    // it for MySQL protocol-compatible databases such as old StarRocks versions
+    // that reject unknown MySQL variables, and for connections that configure
+    // the variable themselves.
     if let Some(query) = setup_mode.group_concat_max_len_query(url) {
         queries.push(query);
     }
@@ -3927,6 +3988,16 @@ pub fn fix_potential_double_encoding(s: &str) -> String {
     }
 }
 
+/// MySQL allows leading/trailing spaces in column names, so keep the name verbatim
+/// and only drop rows whose name is blank.
+fn mysql_column_name(raw: String) -> Option<String> {
+    if raw.trim().is_empty() {
+        None
+    } else {
+        Some(raw)
+    }
+}
+
 fn parse_mysql_enum_values(column_type: &str) -> Option<Vec<String>> {
     let trimmed = column_type.trim();
     if !trimmed.get(..5)?.eq_ignore_ascii_case("enum(") || !trimmed.ends_with(')') {
@@ -4006,10 +4077,7 @@ where
     let mut columns: Vec<ColumnInfo> = rows
         .iter()
         .filter_map(|row| {
-            let name = get_str_by_name(row, "COLUMN_NAME").trim().to_string();
-            if name.is_empty() {
-                return None;
-            }
+            let name = mysql_column_name(get_str_by_name(row, "COLUMN_NAME"))?;
             let column_key = get_str_by_name(row, "COLUMN_KEY");
             let data_type = get_str_by_name(row, "DATA_TYPE");
             let column_type = get_str_by_name(row, "COLUMN_TYPE");
@@ -4070,10 +4138,7 @@ where
     let mut columns: Vec<ColumnInfo> = rows
         .iter()
         .filter_map(|row| {
-            let name = get_str_by_name(row, "Field").trim().to_string();
-            if name.is_empty() {
-                return None;
-            }
+            let name = mysql_column_name(get_str_by_name(row, "Field"))?;
             let key = get_str_by_name(row, "Key");
             let collation = get_opt_str(row, "Collation").filter(|s| !s.is_empty());
             Some(ColumnInfo {
@@ -4508,6 +4573,7 @@ async fn execute_result_set_with_text_protocol_on_conn(
             rows: vec![],
             affected_rows,
             execution_time_ms: start.elapsed().as_millis(),
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -4550,6 +4616,7 @@ async fn execute_result_set_with_text_protocol_on_conn(
             rows: result_rows,
             affected_rows: 0,
             execution_time_ms: start.elapsed().as_millis(),
+            server_execute_time_us: None,
             truncated,
             session_id: None,
             has_more: false,
@@ -4642,6 +4709,7 @@ async fn execute_result_set_with_text_protocol_on_conn(
             rows: result_rows,
             affected_rows: 0,
             execution_time_ms: start.elapsed().as_millis(),
+            server_execute_time_us: None,
             truncated,
             session_id: None,
             has_more: false,
@@ -4770,6 +4838,7 @@ async fn execute_result_sets_with_text_protocol_on_conn(
                 rows,
                 affected_rows: 0,
                 execution_time_ms: start.elapsed().as_millis(),
+                server_execute_time_us: None,
                 truncated,
                 session_id: None,
                 has_more: false,
@@ -4796,6 +4865,7 @@ async fn execute_result_sets_with_text_protocol_on_conn(
             rows: vec![],
             affected_rows,
             execution_time_ms: start.elapsed().as_millis(),
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -4977,6 +5047,7 @@ async fn execute_result_set_with_prepared_protocol_on_conn(
             rows: result_rows,
             affected_rows: 0,
             execution_time_ms: start.elapsed().as_millis(),
+            server_execute_time_us: None,
             truncated,
             session_id: None,
             has_more: false,
@@ -5270,6 +5341,81 @@ pub async fn execute_query_on_conn_with_max_rows(
         .map(|result| result.result)
 }
 
+/// Execute exactly one policy-approved MCP transaction statement using
+/// COM_QUERY/text protocol. This path never retries, rewrites or replays user
+/// SQL. It fully drains the result before exposing the final server status.
+pub async fn execute_transaction_statement_on_conn(
+    conn: &mut mysql_async::Conn,
+    sql: &str,
+    max_rows: Option<usize>,
+) -> Result<MySqlTransactionExecution, MySqlTransactionError> {
+    let started_at = Instant::now();
+    let row_limit = query_result_row_limit(max_rows);
+    let mut query = conn.query_iter(sql).await.map_err(transaction_error_from_mysql_error)?;
+    let columns: Vec<String> = query.columns_ref().iter().map(|column| column.name_str().to_string()).collect();
+    let column_types: Vec<String> = query.columns_ref().iter().map(mysql_column_type_name).collect();
+
+    let result = if columns.is_empty() {
+        let affected_rows = query.affected_rows();
+        let warnings = query.warnings();
+        let info = query.info().into_owned();
+        query.drop_result().await.map_err(transaction_error_from_mysql_error)?;
+        let messages = collect_mysql_server_messages(conn, warnings, &info).await;
+        QueryResult {
+            columns,
+            column_types,
+            column_sortables: Vec::new(),
+            spatial_columns: Vec::new(),
+            spatial_values: Vec::new(),
+            rows: Vec::new(),
+            affected_rows,
+            execution_time_ms: started_at.elapsed().as_millis(),
+            server_execute_time_us: None,
+            truncated: false,
+            session_id: None,
+            has_more: false,
+            elasticsearch_raw_body: None,
+            messages,
+        }
+    } else {
+        let mut spatial_columns = mysql_spatial_column_builder(query.columns_ref());
+        let mut rows = Vec::with_capacity(row_limit.min(128));
+        let mut spatial_values = Vec::new();
+        let mut truncated = false;
+        while let Some(row) = query.next().await.map_err(transaction_error_from_mysql_error)? {
+            if rows.len() < row_limit {
+                let (values, srids) = mysql_row_to_json_with_srids(&row, &mut spatial_columns);
+                spatial_values.push(srids);
+                rows.push(values);
+            } else {
+                truncated = true;
+            }
+        }
+        // `next` stops at the first result-set boundary. Drain every remaining
+        // result set before reading the final status or allowing another
+        // operation on this physical connection.
+        query.drop_result().await.map_err(transaction_error_from_mysql_error)?;
+        QueryResult {
+            columns,
+            column_types,
+            column_sortables: Vec::new(),
+            spatial_columns: spatial_columns.finish(),
+            spatial_values,
+            rows,
+            affected_rows: 0,
+            execution_time_ms: started_at.elapsed().as_millis(),
+            server_execute_time_us: None,
+            truncated,
+            session_id: None,
+            has_more: false,
+            elasticsearch_raw_body: None,
+            messages: Vec::new(),
+        }
+    };
+    let in_transaction = transaction_status_from_last_ok(conn)?;
+    Ok(MySqlTransactionExecution { result, in_transaction })
+}
+
 pub async fn execute_query_on_conn_with_limits(
     conn: &mut mysql_async::Conn,
     sql: &str,
@@ -5379,6 +5525,7 @@ pub async fn execute_query_on_conn_with_limits_progress(
                                 rows: vec![],
                                 affected_rows: 0,
                                 execution_time_ms: start.elapsed().as_millis(),
+                                server_execute_time_us: None,
                                 truncated: false,
                                 session_id: None,
                                 has_more: false,
@@ -5416,6 +5563,7 @@ pub async fn execute_query_on_conn_with_limits_progress(
             rows: vec![],
             affected_rows,
             execution_time_ms: start.elapsed().as_millis(),
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -5544,6 +5692,7 @@ pub async fn execute_non_result_batch_on_conn(
             rows: vec![],
             affected_rows: result.affected_rows(),
             execution_time_ms: elapsed_ms.saturating_sub(previous_elapsed_ms),
+            server_execute_time_us: None,
             truncated: false,
             session_id: None,
             has_more: false,
@@ -6055,6 +6204,24 @@ mod tests {
     use super::*;
     use mysql_async::{consts::ColumnType, Column, Value};
     use mysql_common::row::new_row;
+
+    #[test]
+    fn transaction_error_preserves_server_code_without_treating_it_as_transport_failure() {
+        let error = mysql_async::Error::Server(mysql_async::ServerError {
+            code: 1062,
+            message: "Duplicate entry".to_string(),
+            state: "23000".to_string(),
+        });
+
+        assert_eq!(
+            transaction_error_from_mysql_error(error),
+            MySqlTransactionError::Server {
+                code: 1062,
+                message: "Duplicate entry".to_string(),
+                state: "23000".to_string(),
+            }
+        );
+    }
 
     fn mysql_test_row(values: Vec<Value>) -> mysql_async::Row {
         let columns = values
@@ -7348,6 +7515,15 @@ mod tests {
     }
 
     #[test]
+    fn mysql_column_name_preserves_surrounding_spaces() {
+        assert_eq!(mysql_column_name("  content1".to_string()).as_deref(), Some("  content1"));
+        assert_eq!(mysql_column_name("name ".to_string()).as_deref(), Some("name "));
+        assert_eq!(mysql_column_name("id".to_string()).as_deref(), Some("id"));
+        assert_eq!(mysql_column_name("   ".to_string()), None);
+        assert_eq!(mysql_column_name(String::new()), None);
+    }
+
+    #[test]
     fn parse_mysql_enum_values_preserves_mysql_literal_edges() {
         assert_eq!(
             parse_mysql_enum_values("enum('pending','active','archived')"),
@@ -7833,12 +8009,17 @@ mod tests {
 
     #[test]
     fn mysql_cnch_group_concat_syntax_error_retries_without_session_variable() {
-        let error = "MySQL connection failed: Server error: `ERROR HY000 (1105): unknown error: Error 62 (HY000): Code: 62, e.displayText() = DB::Exception: host = cnch-server-2: Syntax error: failed at position 13 ('group_concat_max_len'): group_concat_max_len = 1048576. Expected one of: Dot, token, Equals SQLSTATE: 42000 (version 21.8.7.1)'";
-
-        assert_eq!(
-            mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error),
-            Some(MySqlSetupMode::Compatible)
-        );
+        for error in [
+            "MySQL connection failed: Server error: `ERROR HY000 (1105): unknown error: Error 62 (HY000): Code: 62, e.displayText() = DB::Exception: host = cnch-server-2: Syntax error: failed at position 13 ('group_concat_max_len'): group_concat_max_len = 1048576. Expected one of: Dot, token, Equals SQLSTATE: 42000 (version 21.8.7.1)'",
+            // Gateways with a reduced parser may quote the expression instead of
+            // the variable name; the floor statement is still the rejected one.
+            "MySQL connection failed: Server error: `ERROR HY000 (1105): Syntax error: failed at position 36 ('cast'): cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned). Expected one of: EQUALS'",
+        ] {
+            assert_eq!(
+                mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error),
+                Some(MySqlSetupMode::Compatible)
+            );
+        }
     }
 
     #[test]
@@ -7948,12 +8129,18 @@ mod tests {
 
     #[test]
     fn mysql_sphinxql_group_concat_boolean_error_retries_without_session_variable() {
-        let error = "MySQL connection failed: Server error: `ERROR 42000 (1064): sphinxql: only 0 and 1 could be used as boolean values near '1048576'`";
-
-        assert_eq!(
-            mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error),
-            Some(MySqlSetupMode::Compatible)
-        );
+        for error in [
+            "MySQL connection failed: Server error: `ERROR 42000 (1064): sphinxql: only 0 and 1 could be used as boolean values near '1048576'`",
+            // The floor statement now also uses `cast(... as unsigned)`, so
+            // SphinxQL may quote a different token while reporting the same
+            // boolean rejection.
+            "MySQL connection failed: Server error: `ERROR 42000 (1064): sphinxql: only 0 and 1 could be used as boolean values near 'group_concat_max_len'`",
+        ] {
+            assert_eq!(
+                mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Standard, error),
+                Some(MySqlSetupMode::Compatible)
+            );
+        }
     }
 
     #[test]
@@ -7995,14 +8182,44 @@ mod tests {
     fn mysql_setup_queries_select_requested_database_before_session_init() {
         let queries = mysql_setup_queries("mysql://root:secret@localhost:3306/app?charset=utf8mb4", &[]);
 
-        assert_eq!(queries, vec!["USE `app`", "SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576"]);
+        assert_eq!(
+            queries,
+            vec![
+                "USE `app`",
+                "SET NAMES utf8mb4",
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
+            ]
+        );
+    }
+
+    #[test]
+    fn mysql_group_concat_setup_never_lowers_a_higher_server_limit() {
+        // A server that already raises `SET GLOBAL group_concat_max_len` above the
+        // built-in floor (for example 8388608) must keep that value: the setup
+        // statement raises small session values only.
+        let queries = mysql_setup_queries("mysql://root:secret@localhost:3306/app?charset=utf8mb4", &[]);
+
+        let setup = queries
+            .iter()
+            .find(|query| query.contains("group_concat_max_len"))
+            .expect("group_concat_max_len setup statement");
+        assert_eq!(
+            setup,
+            "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
+        );
     }
 
     #[test]
     fn mysql_setup_queries_skip_use_when_database_missing() {
         let queries = mysql_setup_queries("mysql://root:secret@localhost:3306?charset=utf8mb4", &[]);
 
-        assert_eq!(queries, vec!["SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576"]);
+        assert_eq!(
+            queries,
+            vec![
+                "SET NAMES utf8mb4",
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
+            ]
+        );
     }
 
     #[test]
@@ -8044,7 +8261,14 @@ mod tests {
     fn mysql_setup_queries_decode_database_name_from_url() {
         let queries = mysql_setup_queries("mysql://root:secret@localhost:3306/db%2Fname?charset=utf8mb4", &[]);
 
-        assert_eq!(queries, vec!["USE `db/name`", "SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576"]);
+        assert_eq!(
+            queries,
+            vec![
+                "USE `db/name`",
+                "SET NAMES utf8mb4",
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
+            ]
+        );
     }
 
     #[test]
@@ -8053,7 +8277,11 @@ mod tests {
 
         assert_eq!(
             queries,
-            vec!["USE ` analytics `", "SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576"]
+            vec![
+                "USE ` analytics `",
+                "SET NAMES utf8mb4",
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
+            ]
         );
     }
 
@@ -8067,7 +8295,11 @@ mod tests {
 
         assert_eq!(
             queries,
-            vec!["USE `app``proxy`", "SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576"]
+            vec![
+                "USE `app``proxy`",
+                "SET NAMES utf8mb4",
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
+            ]
         );
     }
 
@@ -8340,7 +8572,11 @@ mod tests {
     fn mysql_setup_queries_default_to_utf8mb4() {
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db", &[]),
-            vec!["USE `db`", "SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576"]
+            vec![
+                "USE `db`",
+                "SET NAMES utf8mb4",
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
+            ]
         );
     }
 
@@ -8348,11 +8584,19 @@ mod tests {
     fn mysql_setup_queries_use_safe_custom_charset() {
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?ssl-mode=preferred&charset=gbk", &[]),
-            vec!["USE `db`", "SET NAMES gbk", "SET SESSION group_concat_max_len = 1048576"]
+            vec![
+                "USE `db`",
+                "SET NAMES gbk",
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
+            ]
         );
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?charset=utf8mb4;DROP TABLE users", &[]),
-            vec!["USE `db`", "SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576"]
+            vec![
+                "USE `db`",
+                "SET NAMES utf8mb4",
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
+            ]
         );
     }
 
@@ -8365,7 +8609,7 @@ mod tests {
             vec![
                 "USE `db`",
                 "SET NAMES utf8mb4",
-                "SET SESSION group_concat_max_len = 1048576",
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)",
                 "SET ob_query_timeout = 30000000"
             ]
         );
@@ -8382,7 +8626,7 @@ mod tests {
                 "USE `db`",
                 "SET SESSION query_timeout=60,SESSION sql_mode='STRICT,TRADITIONAL',@trace_id=concat('a,b','c')",
                 "SET NAMES utf8mb4",
-                "SET SESSION group_concat_max_len = 1048576",
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)",
             ]
         );
     }
@@ -8391,7 +8635,11 @@ mod tests {
     fn mysql_setup_queries_ignore_empty_session_variables() {
         assert_eq!(
             mysql_setup_queries("mysql://host:9030/db?sessionVariables=%20%2C%20%3B%20", &[]),
-            vec!["USE `db`", "SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576"]
+            vec![
+                "USE `db`",
+                "SET NAMES utf8mb4",
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
+            ]
         );
     }
 
@@ -8445,7 +8693,7 @@ mod tests {
                 "USE `db`",
                 "SET @group_concat_max_len=2048",
                 "SET NAMES utf8mb4",
-                "SET SESSION group_concat_max_len = 1048576",
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)",
             ]
         );
         assert_eq!(
@@ -8454,7 +8702,7 @@ mod tests {
                 "USE `db`",
                 "SET @@global.group_concat_max_len=512",
                 "SET NAMES utf8mb4",
-                "SET SESSION group_concat_max_len = 1048576",
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)",
             ]
         );
     }
@@ -8467,7 +8715,7 @@ mod tests {
                 "USE `db`",
                 "SET time_zone = '+08:00'",
                 "SET NAMES utf8mb4",
-                "SET SESSION group_concat_max_len = 1048576"
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
             ]
         );
         assert_eq!(
@@ -8476,7 +8724,7 @@ mod tests {
                 "USE `db`",
                 "SET time_zone = 'Asia/Shanghai'",
                 "SET NAMES utf8mb4",
-                "SET SESSION group_concat_max_len = 1048576"
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
             ]
         );
     }
@@ -8489,7 +8737,7 @@ mod tests {
                 "USE `db`",
                 "SET time_zone = '+08:00'",
                 "SET NAMES utf8mb4",
-                "SET SESSION group_concat_max_len = 1048576"
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
             ]
         );
         assert_eq!(
@@ -8498,7 +8746,7 @@ mod tests {
                 "USE `db`",
                 "SET time_zone = '+00:00'",
                 "SET NAMES utf8mb4",
-                "SET SESSION group_concat_max_len = 1048576"
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
             ]
         );
     }
@@ -8511,7 +8759,7 @@ mod tests {
                 "USE `db`",
                 "SET time_zone = 'Asia/Shanghai'",
                 "SET NAMES utf8mb4",
-                "SET SESSION group_concat_max_len = 1048576"
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
             ]
         );
         assert_eq!(
@@ -8520,7 +8768,7 @@ mod tests {
                 "USE `db`",
                 "SET time_zone = '+08:00'",
                 "SET NAMES utf8mb4",
-                "SET SESSION group_concat_max_len = 1048576"
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
             ]
         );
     }
@@ -8529,7 +8777,11 @@ mod tests {
     fn mysql_setup_queries_ignore_unsafe_time_zone_values() {
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?time_zone=%2B08%3A00%27%3BDROP%20TABLE%20users", &[]),
-            vec!["USE `db`", "SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576"]
+            vec![
+                "USE `db`",
+                "SET NAMES utf8mb4",
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
+            ]
         );
     }
 
@@ -8556,7 +8808,11 @@ mod tests {
     fn mysql_setup_queries_omits_catalog_when_absent() {
         assert_eq!(
             mysql_setup_queries("mysql://host:3306/db?charset=utf8mb4", &[]),
-            vec!["USE `db`", "SET NAMES utf8mb4", "SET SESSION group_concat_max_len = 1048576"]
+            vec![
+                "USE `db`",
+                "SET NAMES utf8mb4",
+                "SET SESSION group_concat_max_len = cast(greatest(@@session.group_concat_max_len, 1048576) as unsigned)"
+            ]
         );
     }
 

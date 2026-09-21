@@ -23,6 +23,10 @@ async function getBackend(): Promise<Backend> {
 // ---------------------------------------------------------------------------
 
 function forward<K extends keyof Backend>(name: K): Backend[K] {
+  // SAFETY: the resolved module is one of exactly two implementations of the same
+  // surface — `http.ts` imports its request/response types from `tauri.ts` on
+  // purpose, so both transports are kept signature-compatible by construction.
+  // TypeScript cannot express that cross-module equivalence, hence the cast.
   return (async (...args: unknown[]) => {
     const startedAt = performance.now();
     const operation = String(name);
@@ -216,6 +220,7 @@ export const listTriggers = forward("listTriggers");
 export const listConstraints = forward("listConstraints");
 export const listPartitions = forward("listPartitions");
 export const getTablePartitionStatus = forward("getTablePartitionStatus");
+export const getTablePartitioning = forward("getTablePartitioning");
 export const listInvalidIndexes = forward("listInvalidIndexes");
 export const listSubpartitions = forward("listSubpartitions");
 export const getTableDdl = forward("getTableDdl");
@@ -262,6 +267,8 @@ export const prepareQueryPaginationExecutionPlan = forward("prepareQueryPaginati
 export const buildSortedQuerySql = forward("buildSortedQuerySql");
 export const buildExplainSql = forward("buildExplainSql");
 export const getExplainInfo = forward("getExplainInfo");
+export const getPluginPlanCapabilities = forward("getPluginPlanCapabilities");
+export const getPluginEstimatedPlan = forward("getPluginEstimatedPlan");
 export const buildCreateUserSql = forward("buildCreateUserSql");
 export const buildDroppedFilePreviewSql = forward("buildDroppedFilePreviewSql");
 export const buildTableSelectSql = forward("buildTableSelectSql");
@@ -293,6 +300,8 @@ export const buildRoutineRenameObjectSourceStatements = forward("buildRoutineRen
 export const buildViewDdlSql = forward("buildViewDdlSql");
 export const buildTableStructureChangeSql = forward("buildTableStructureChangeSql");
 export const buildTableOwnerChangeSql = forward("buildTableOwnerChangeSql");
+export const buildTablePartitionOperationSql = forward("buildTablePartitionOperationSql");
+export const buildCreatePartitionedTableSql = forward("buildCreatePartitionedTableSql");
 export const previewSqliteTableStructureChange = forward("previewSqliteTableStructureChange");
 export const applySqliteTableStructureChange = forward("applySqliteTableStructureChange");
 export const buildCreateTableSql = forward("buildCreateTableSql");
@@ -838,6 +847,7 @@ export const meilisearchGetIndexSettings = forward("meilisearchGetIndexSettings"
 export const meilisearchUpdateIndexSettings = forward("meilisearchUpdateIndexSettings");
 export const meilisearchGetIndexStats = forward("meilisearchGetIndexStats");
 export const meilisearchGetIndexOverview = forward("meilisearchGetIndexOverview");
+export const meilisearchCreateIndex = forward("meilisearchCreateIndex");
 export const meilisearchDeleteIndex = forward("meilisearchDeleteIndex");
 export const meilisearchDeleteAllDocuments = forward("meilisearchDeleteAllDocuments");
 export const meilisearchGetSystemOverview = forward("meilisearchGetSystemOverview");

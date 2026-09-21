@@ -209,6 +209,7 @@ const supportsExplain = computed(() => {
     dbType !== "elasticsearch" &&
     dbType !== "easysearch" &&
     dbType !== "meilisearch" &&
+    dbType !== "solr" &&
     dbType !== "qdrant" &&
     dbType !== "milvus" &&
     dbType !== "weaviate" &&
@@ -295,7 +296,7 @@ const executeButtonClass = computed(() => {
 const canMultiExecute = computed(() => {
   if (!supportsQueryExecution(props.activeConnection?.db_type)) return false;
   if (props.activeTab.isExecuting || props.activeTab.isExplaining || props.activeTab.isCancelling) return false;
-  if (props.autoCommit === false || isTransactionActive.value) return false;
+  if (isTransactionActive.value) return false;
   return !!props.executableSql.trim();
 });
 
@@ -758,6 +759,7 @@ async function changeCatalog(selectedCatalog: string) {
           activeConnection?.db_type !== 'elasticsearch' &&
           activeConnection?.db_type !== 'easysearch' &&
           activeConnection?.db_type !== 'meilisearch' &&
+          activeConnection?.db_type !== 'solr' &&
           activeConnection?.db_type !== 'qdrant' &&
           activeConnection?.db_type !== 'milvus' &&
           activeConnection?.db_type !== 'weaviate' &&
