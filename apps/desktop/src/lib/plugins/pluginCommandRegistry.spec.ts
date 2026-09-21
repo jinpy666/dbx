@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createFrontendPluginRegistry } from "./frontendPlugin";
+import { createFrontendPluginRegistry, evaluatePluginCommandConditions } from "./frontendPlugin";
 import { executePluginCommand } from "./pluginCommandRegistry";
 import { closePluginDockEntry, usePluginBottomDock } from "./pluginBottomDock";
 import type { InstalledPlugin, PluginMenusContribution } from "@/types/database";
@@ -147,6 +147,60 @@ describe("plugin command registry (PR-A4)", () => {
     expect(executePluginCommand(registry, { openPluginWorkbench } as never, "io.dbx.ssh", "missing-command").error).toBeTruthy();
     expect(executePluginCommand(registry, { openPluginWorkbench } as never, "io.dbx.ssh", "open-local-terminal").error).toContain("missing workbench");
     expect(openPluginWorkbench).not.toHaveBeenCalled();
+  });
+
+  it("evaluates §5.3 conditions (equals/notEquals/oneOf, missing key = false)", () => {
+    expect(evaluatePluginCommandConditions([{ key: "surface", operator: "equals", value: "tab" }], { surface: "tab" })).toBe(true);
+    expect(evaluatePluginCommandConditions([{ key: "surface", operator: "notEquals", value: "tab" }], { surface: "tab" })).toBe(false);
+    expect(evaluatePluginCommandConditions([{ key: "connection.state", operator: "oneOf", value: ["connected", "reconnecting"] }], { "connection.state": "connected" })).toBe(true);
+    // 空条件组缺省 true；缺失 key 一律 false（§5.3）。
+    expect(evaluatePluginCommandConditions([], {})).toBe(true);
+    expect(evaluatePluginCommandConditions([{ key: "object.type", operator: "equals", value: "table" }], {})).toBe(false);
+    // all 内隐式 AND。
+    expect(
+      evaluatePluginCommandConditions(
+        [
+          { key: "surface", operator: "equals", value: "tab" },
+          { key: "readOnly", operator: "equals", value: false },
+        ],
+        { surface: "tab", readOnly: false },
+      ),
+    ).toBe(true);
+    expect(
+      evaluatePluginCommandConditions(
+        [
+          { key: "surface", operator: "equals", value: "tab" },
+          { key: "readOnly", operator: "equals", value: true },
+        ],
+        { surface: "tab", readOnly: false },
+      ),
+    ).toBe(false);
+  });
+
+  it("gates execution by enablement against the context snapshot", () => {
+    const command = (enablement: unknown) =>
+      [
+        { type: "workbench", id: "io.dbx.ssh.workbench", label: "SSH" },
+        localTerminalCommand(),
+        { type: "command", id: "gated", label: "Gated", enablement, action: { type: "open-workbench", workbench: "io.dbx.ssh.workbench", context: { plugin: { mode: "local-terminal" } } } },
+      ] as unknown as InstalledPlugin["manifest"]["contributions"];
+    const openPluginWorkbench = vi.fn();
+
+    const pass = createFrontendPluginRegistry([installedPlugin("io.dbx.ssh", command({ all: [{ key: "surface", operator: "equals", value: "tab" }] } as unknown as InstalledPlugin["manifest"]["contributions"]))]);
+    expect(executePluginCommand(pass, { openPluginWorkbench: vi.fn() } as never, "io.dbx.ssh", "gated").error).toBeUndefined();
+
+    const blocked = createFrontendPluginRegistry([installedPlugin("io.dbx.ssh", command({ all: [{ key: "surface", operator: "equals", value: "panel" }] } as unknown as InstalledPlugin["manifest"]["contributions"]))]);
+    const result = executePluginCommand(blocked, { openPluginWorkbench } as never, "io.dbx.ssh", "gated");
+    expect(result.error).toContain("disabled by enablement");
+    expect(openPluginWorkbench).not.toHaveBeenCalled();
+  });
+
+  it("listToolbarMenuCommands applies when visibility against the placement surface", () => {
+    const menus = (value: string) => menusContribution([{ location: "appToolbar", command: "open-local-terminal", group: "navigation", order: 100, default_visible: true, when: { all: [{ key: "surface", operator: "equals", value }] } }]);
+    const show = createFrontendPluginRegistry([installedPlugin("io.dbx.ssh", [localTerminalCommand(), menus("appToolbar")] as unknown as InstalledPlugin["manifest"]["contributions"])]);
+    expect(show.listToolbarMenuCommands()).toHaveLength(1);
+    const hide = createFrontendPluginRegistry([installedPlugin("io.dbx.ssh", [localTerminalCommand(), menus("panel")] as unknown as InstalledPlugin["manifest"]["contributions"])]);
+    expect(hide.listToolbarMenuCommands()).toHaveLength(0);
   });
 
   it("finds the declared command targeting a workbench for entry routing", () => {

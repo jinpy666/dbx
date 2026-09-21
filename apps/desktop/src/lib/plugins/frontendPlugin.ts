@@ -2,6 +2,8 @@ import type {
   ConnectionConfig,
   InstalledPlugin,
   PluginCommandContribution,
+  PluginConditionClause,
+  PluginConditionContextKeys,
   PluginConnectionAction,
   PluginConnectionProviderContribution,
   PluginContribution,
@@ -102,7 +104,7 @@ export class FrontendPluginRegistry {
     for (const definition of this.definitions) {
       for (const contribution of definition.contributions) {
         if (contribution.type !== "menus") continue;
-        const placements = contribution.items.filter((item) => item.location === "appToolbar" && item.default_visible === true).sort((a, b) => a.order - b.order || a.command.localeCompare(b.command));
+        const placements = contribution.items.filter((item) => item.location === "appToolbar" && item.default_visible === true && evaluateWhen(item.when, "appToolbar")).sort((a, b) => a.order - b.order || a.command.localeCompare(b.command));
         for (const item of placements) {
           const command = definition.contributions.find((candidate): candidate is PluginCommandContribution => candidate.type === "command" && candidate.id === item.command);
           if (command) result.push({ plugin: definition.plugin, command, order: item.order });
@@ -123,6 +125,25 @@ export class FrontendPluginRegistry {
 /** menus 贡献没有自身 label（文案来自其引用的 command），排序键退化为 id。 */
 function pluginContributionSortLabel(contribution: PluginContribution): string {
   return (contribution as { label?: string }).label || contribution.id;
+}
+
+/**
+ * §5.3/§5.4 条件求值（纯函数）：all 内隐式 AND；引用不存在 key 的子句对所有
+ * 操作符均为 false。contextKeys 由宿主按场景提供快照。
+ */
+export function evaluatePluginCommandConditions(clauses: PluginConditionClause[] | undefined, contextKeys: PluginConditionContextKeys): boolean {
+  return (clauses ?? []).every((clause) => {
+    const actual = contextKeys[clause.key];
+    if (actual === undefined) return false;
+    if (clause.operator === "equals") return String(actual) === String(clause.value);
+    if (clause.operator === "notEquals") return String(actual) !== String(clause.value);
+    return Array.isArray(clause.value) && clause.value.map(String).includes(String(actual));
+  });
+}
+
+/** placement 渲染门控：when 缺省可见；按 placement surface 快照求值。 */
+function evaluateWhen(when: { all: PluginConditionClause[] } | undefined, surface: string): boolean {
+  return evaluatePluginCommandConditions(when?.all, { surface });
 }
 
 export function createFrontendPluginRegistry(plugins: readonly InstalledPlugin[], locale = "en"): FrontendPluginRegistry {

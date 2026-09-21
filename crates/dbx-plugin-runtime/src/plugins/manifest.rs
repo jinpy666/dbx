@@ -686,8 +686,43 @@ pub const PLUGIN_MENU_GROUPS: &[&str] = &["navigation", "primary", "secondary", 
 /// surfaces bounded regardless of what a manifest declares.
 pub const PLUGIN_MENUS_ITEMS_MAX: usize = 64;
 
+/// enablement/when 单组条件条数上限。
+pub const PLUGIN_CONDITION_CLAUSES_MAX: usize = 16;
+
 /// Upper bound for one command's `context` JSON payload (serialized size).
 pub const PLUGIN_COMMAND_CONTEXT_MAX_BYTES: usize = 64 * 1024;
+
+/// 条件求值上下文键保留词表（HOST_PLUGIN_UI_SPEC §5.3 v1）。键外的值整个
+/// manifest 校验失败——不做"静默忽略"。
+pub const PLUGIN_CONDITION_KEYS: &[&str] = &["connection.state", "object.type", "surface", "readOnly"];
+
+/// 单条命令条件（enablement/when 共用结构）。`value`：equals/notEquals 为
+/// 字符串；oneOf 为字符串数组。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginCommandConditionClause {
+    pub key: String,
+    pub operator: PluginConditionOperator,
+    pub value: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PluginConditionOperator {
+    #[serde(rename = "equals")]
+    Equals,
+    #[serde(rename = "notEquals")]
+    NotEquals,
+    #[serde(rename = "oneOf")]
+    OneOf,
+}
+
+/// enablement/when 的条件组：all 内隐式 AND；字段缺省为 true。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginCommandEnablement {
+    #[serde(default)]
+    pub all: Vec<PluginCommandConditionClause>,
+}
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -754,6 +789,9 @@ pub struct PluginCommandContribution {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
     pub action: PluginCommandAction,
+    /// 可执行条件（缺省 true）；宿主执行前必须基于当前 context 快照重新求值。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enablement: Option<PluginCommandEnablement>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -777,6 +815,9 @@ pub struct PluginMenuItem {
     /// Toolbar entries default to hidden; sidebar entries default to visible.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_visible: Option<bool>,
+    /// placement 可见条件（缺省 true）；与 command.enablement 独立求值。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<PluginCommandEnablement>,
 }
 
 /// Declared placement of plugin commands across host surfaces. Entry labels
@@ -1302,6 +1343,11 @@ fn validate_contributions(
                 if !has_ui {
                     errors.push(format!("Command contribution '{id}' requires a UI entrypoint"));
                 }
+                validate_command_enablement(
+                    command.enablement.as_ref(),
+                    &format!("Command '{id}' enablement"),
+                    errors,
+                );
                 match &command.action {
                     PluginCommandAction::OpenWorkbench(action) => {
                         validate_optional_reference(Some(action.workbench.as_str()), "workbench", id, errors);
@@ -1344,6 +1390,11 @@ fn validate_contributions(
                             item.location, item.command
                         ));
                     }
+                    validate_command_enablement(
+                        item.when.as_ref(),
+                        &format!("Menus '{id}' item '{}' when", item.command),
+                        errors,
+                    );
                     validate_optional_reference(Some(item.command.as_str()), "command", id, errors);
                     menu_command_references.push((id.to_string(), item.command.clone()));
                 }
@@ -1371,6 +1422,47 @@ fn validate_contributions(
     for (command, workbench) in command_workbench_references {
         if !workbench_ids.contains(&workbench) {
             errors.push(format!("Command '{command}' references missing workbench '{workbench}'"));
+        }
+    }
+}
+
+/// enablement/when 条件组校验：键/操作符在 v1 保留词表内、值形状匹配操作符
+/// （equals/notEquals=字符串，oneOf=非空字符串数组）、条数有界。
+fn validate_command_enablement(
+    enablement: Option<&PluginCommandEnablement>,
+    label: &str,
+    errors: &mut Vec<String>,
+) {
+    let Some(enablement) = enablement else {
+        return;
+    };
+    if enablement.all.len() > PLUGIN_CONDITION_CLAUSES_MAX {
+        errors.push(format!(
+            "{label} declares {} conditions; at most {PLUGIN_CONDITION_CLAUSES_MAX} are allowed",
+            enablement.all.len()
+        ));
+    }
+    for clause in &enablement.all {
+        if !PLUGIN_CONDITION_KEYS.contains(&clause.key.as_str()) {
+            errors.push(format!(
+                "{label} uses key '{}' outside the host word list ({})",
+                clause.key,
+                PLUGIN_CONDITION_KEYS.join(", ")
+            ));
+        }
+        let value_is_string = clause.value.as_str().is_some();
+        let value_is_string_array = clause.value.as_array().is_some_and(|values| !values.is_empty() && values.iter().all(|value| value.is_string()));
+        match clause.operator {
+            PluginConditionOperator::Equals | PluginConditionOperator::NotEquals => {
+                if !value_is_string {
+                    errors.push(format!("{label} condition '{}' requires a string value for equals/notEquals", clause.key));
+                }
+            }
+            PluginConditionOperator::OneOf => {
+                if !value_is_string_array {
+                    errors.push(format!("{label} condition '{}' requires a non-empty string array value for oneOf", clause.key));
+                }
+            }
         }
     }
 }
@@ -1734,6 +1826,74 @@ mod tests {
             "type": "invoke-sidecar", "method": "x"
         }));
         assert!(rpc.is_err(), "RPC 动作不属于 v1 契约");
+    }
+
+    #[test]
+    fn command_enablement_and_menu_when_parse_and_validate() {
+        let plugin_dir = std::env::temp_dir();
+        let workbench = serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "workbench", "id": "sample.main", "label": "Sample"
+        }))
+        .unwrap();
+        let command = serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "command", "id": "cmd", "label": "C",
+            "enablement": { "all": [ { "key": "surface", "operator": "equals", "value": "tab" } ] },
+            "action": { "type": "open-workbench", "workbench": "sample.main" }
+        }))
+        .unwrap();
+        let menus = serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "menus", "id": "entrypoints",
+            "items": [
+                { "location": "commandPalette", "command": "cmd", "group": "primary", "order": 100,
+                  "when": { "all": [ { "key": "connection.state", "operator": "oneOf", "value": ["connected", "reconnecting"] } ] } }
+            ]
+        }))
+        .unwrap();
+        let mut errors = Vec::new();
+        validate_contributions(&[workbench, command, menus], false, true, &plugin_dir, &mut errors);
+        assert!(errors.is_empty(), "{errors:?}");
+
+        // 键词表外的值拒收。
+        let bad_key = serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "command", "id": "cmd", "label": "C",
+            "enablement": { "all": [ { "key": "custom.thing", "operator": "equals", "value": "x" } ] },
+            "action": { "type": "open-workbench", "workbench": "sample.main" }
+        }))
+        .unwrap();
+        let mut errors = Vec::new();
+        validate_contributions(&[bad_key], false, true, &plugin_dir, &mut errors);
+        assert!(errors.iter().any(|e| e.contains("outside the host word list")), "{errors:?}");
+
+        // 值形状与操作符不匹配拒收（oneOf 需非空字符串数组）。
+        let bad_value = serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "menus", "id": "entrypoints",
+            "items": [
+                { "location": "appToolbar", "command": "cmd", "group": "primary", "order": 100,
+                  "when": { "all": [ { "key": "surface", "operator": "oneOf", "value": "tab" } ] } }
+            ]
+        }))
+        .unwrap();
+        let mut errors = Vec::new();
+        validate_contributions(&[bad_value], false, true, &plugin_dir, &mut errors);
+        assert!(errors.iter().any(|e| e.contains("non-empty string array")), "{errors:?}");
+
+        // 条数上限拒收。
+        let clauses: Vec<serde_json::Value> = (0..20)
+            .map(|index| serde_json::json!({ "key": "surface", "operator": "equals", "value": "tab", "__i": index }))
+            .collect();
+        // __i 为未知字段，去掉；改为 20 条合法 surface 条件。
+        let clauses: Vec<serde_json::Value> = (0..20)
+            .map(|_| serde_json::json!({ "key": "surface", "operator": "equals", "value": "tab" }))
+            .collect();
+        let too_many = serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "command", "id": "cmd", "label": "C",
+            "enablement": { "all": clauses },
+            "action": { "type": "open-workbench", "workbench": "sample.main" }
+        }))
+        .unwrap();
+        let mut errors = Vec::new();
+        validate_contributions(&[too_many], false, true, &plugin_dir, &mut errors);
+        assert!(errors.iter().any(|e| e.contains("at most 16 are allowed")), "{errors:?}");
     }
 
     #[test]

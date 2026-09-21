@@ -10,9 +10,9 @@ import { useI18n } from "vue-i18n";
 import * as api from "@/lib/backend/api";
 import { uuid } from "@/lib/common/utils";
 import { addPluginDockEntry } from "@/lib/plugins/pluginBottomDock";
-import { createFrontendPluginRegistry, type FrontendPluginRegistry } from "@/lib/plugins/frontendPlugin";
+import { createFrontendPluginRegistry, evaluatePluginCommandConditions, type FrontendPluginRegistry } from "@/lib/plugins/frontendPlugin";
 import { useQueryStore } from "@/stores/queryStore";
-import type { PluginCommandContribution } from "@/types/database";
+import type { PluginCommandContribution, PluginConditionContextKeys } from "@/types/database";
 
 export interface PluginToolbarCommandEntry {
   pluginId: string;
@@ -27,7 +27,10 @@ export interface PluginCommandExecutionResult {
   error?: string;
 }
 
-/** Re-checks the command and its workbench reference at execution time, then opens the workbench tab. */
+/**
+ * §5.4 执行前重新校验 enablement（基于当前 context 快照；surface 键随
+ * presentation 取值）。
+ */
 export function executePluginCommand(registry: FrontendPluginRegistry, queryStore: ReturnType<typeof useQueryStore>, pluginId: string, commandId: string): PluginCommandExecutionResult {
   const command = registry.findCommand(pluginId, commandId)?.contribution;
   if (!command) return { error: `Unknown command '${pluginId}.${commandId}'` };
@@ -35,6 +38,12 @@ export function executePluginCommand(registry: FrontendPluginRegistry, queryStor
   if (action.type !== "open-workbench") return { error: `Command '${pluginId}.${commandId}' has an unsupported action` };
   const workbench = registry.findWorkbench(pluginId, action.workbench);
   if (!workbench) return { error: `Command '${pluginId}.${commandId}' references missing workbench '${action.workbench}'` };
+  // §5.4 执行前重新校验 enablement（基于当前 context 快照；surface 键随
+  // presentation 取值）。
+  const commandContextKeys: PluginConditionContextKeys = { surface: action.presentation === "panel" ? "panel" : "tab", "connection.state": "none", readOnly: false };
+  if (!evaluatePluginCommandConditions(command.enablement?.all, commandContextKeys)) {
+    return { error: `Command '${pluginId}.${commandId}' is disabled by enablement` };
+  }
   // presentation: panel → 全局底部 Dock（§8.3）新增一个终端条目；tab（缺省）
   // → 工作台 tab。
   if (action.presentation === "panel") {
