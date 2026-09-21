@@ -96,6 +96,12 @@ function togglePluginCommand(entry: PluginToolbarCommandEntry) {
 }
 const settingsStore = useSettingsStore();
 const toolbarItems = computed(() => settingsStore.editorSettings.toolbarItems);
+// §5.2：渲染 = manifest default_visible（usePluginToolbarCommands 已过滤）且
+// 未被设置页隐藏（pluginToolbarHidden 键 = `${pluginId}.${commandId}`）。
+const visiblePluginCommandEntries = computed(() => {
+  const hidden = settingsStore.editorSettings.pluginToolbarHidden;
+  return pluginCommandEntries.value.filter((entry) => !hidden[`${entry.pluginId}.${entry.commandId}`]);
+});
 const { isMac, isDesktop, showControls, isMaximized, isFullscreen, minimize, toggleMaximize, close } = useWindowControls();
 const updateTooltip = computed(() => {
   if (props.hasUpdateAvailable && props.updateReady) return t("updates.restartRequiredTooltip");
@@ -766,7 +772,7 @@ const toolbarStyle = computed(() => {
         <TooltipContent>GitHub</TooltipContent>
       </Tooltip>
 
-      <Tooltip v-for="entry in pluginCommandEntries" :key="`${entry.pluginId}.${entry.commandId}`">
+      <Tooltip v-for="entry in visiblePluginCommandEntries" :key="`${entry.pluginId}.${entry.commandId}`">
         <TooltipTrigger as-child>
           <Button variant="ghost" size="icon" class="toolbar-action-button relative h-8 w-8 shrink-0" :class="{ 'toolbar-action-button--active bg-accent': dockVisible }" :aria-label="entry.label" @click="togglePluginCommand(entry)">
             <PluginIcon :plugin-id="entry.pluginId" :icon="entry.icon" class="toolbar-action-icon h-4 w-4" />

@@ -7173,6 +7173,8 @@ export default withEnglishFallback({
     fontSize: "字号",
     toolbarTitle: "工具栏",
     toolbarHiddenHint: '部分关闭或空间不足的按钮会自动收进"更多"下拉菜单。',
+    pluginToolbarCommands: "插件命令",
+    pluginToolbarCommandsHint: "显示或隐藏已安装插件贡献的工具栏入口。",
     exclusiveRightSidebarPanels: "右侧边栏一次仅显示一个面板",
     exclusiveRightSidebarPanelsDescription: "打开一个右侧面板时关闭其他面板。关闭此选项可同时显示多个面板。",
     uiScale: "界面缩放",

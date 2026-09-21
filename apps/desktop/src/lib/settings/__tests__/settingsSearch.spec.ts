@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   SETTINGS_SEARCH_DEFINITIONS,
   TOOLBAR_VISIBILITY_ITEMS,
+  createPluginToolbarCommandSearchDefinitions,
   createShortcutSettingsSearchDefinitions,
   createToolbarVisibilitySettingsSearchDefinitions,
   resolveSettingsCategory,
@@ -233,6 +234,26 @@ describe("settings search", () => {
     expect(definitions.map((definition) => definition.id)).toEqual(TOOLBAR_VISIBILITY_ITEMS.map((item) => `appearance-toolbar-${item.key}`));
     expect(definitions).toContainEqual({ id: "appearance-toolbar-dataTransfer", category: "appearance", titleKey: "transfer.dataTransfer", targetId: "appearance" });
     expect(definitions).toContainEqual({ id: "appearance-toolbar-ai", category: "appearance", title: "AI", targetId: "appearance" });
+  });
+
+  it("derives a searchable entry per installed plugin toolbar command", () => {
+    const definitions = createPluginToolbarCommandSearchDefinitions([
+      { pluginId: "dbx-terminal", pluginName: "Terminal", commandId: "openTerminal", label: "Open Terminal" },
+      { pluginId: "dbx-ai", pluginName: "AI Assistant", commandId: "run", label: "Run Assistant" },
+      { pluginId: "dbx-logs", pluginName: "Log Viewer", commandId: "tail", label: "Tail Logs" },
+    ]);
+
+    expect(definitions).toEqual([
+      { id: "appearance-plugin-toolbar-dbx-terminal.openTerminal", category: "appearance", title: "Open Terminal", description: "Terminal", targetId: "appearance" },
+      { id: "appearance-plugin-toolbar-dbx-ai.run", category: "appearance", title: "Run Assistant", description: "AI Assistant", targetId: "appearance" },
+      { id: "appearance-plugin-toolbar-dbx-logs.tail", category: "appearance", title: "Tail Logs", description: "Log Viewer", targetId: "appearance" },
+    ]);
+
+    // 命令 label 与插件名（副文本）都可命中搜索。
+    const entries = resolveSettingsSearchEntries(definitions, { isWeb: false, visibleCategories: new Set<SettingsCategory>(["appearance"]) }, (key) => key, categoryLabels);
+    expect(searchSettings(entries, "terminal", "en").map((entry) => entry.id)).toEqual(["appearance-plugin-toolbar-dbx-terminal.openTerminal"]);
+    expect(searchSettings(entries, "assistant", "en").map((entry) => entry.id)).toEqual(["appearance-plugin-toolbar-dbx-ai.run"]);
+    expect(searchSettings(entries, "viewer", "en").map((entry) => entry.id)).toEqual(["appearance-plugin-toolbar-dbx-logs.tail"]);
   });
 
   it("indexes the existing descriptions for fixed appearance controls", () => {

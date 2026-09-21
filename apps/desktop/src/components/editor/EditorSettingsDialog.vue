@@ -120,6 +120,7 @@ import { DATA_GRID_TYPE_COLOR_SCHEME_AUTO_ID, cloneDataGridTypeColorSchemes, typ
 import TunnelProfileManager from "@/components/connection/TunnelProfileManager.vue";
 import DangerConfirmDialog from "./DangerConfirmDialog.vue";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { createFrontendPluginRegistry } from "@/lib/plugins/frontendPlugin";
 import { useTheme } from "@/composables/useTheme";
 import { copyToClipboard, readTextFromClipboard } from "@/lib/common/clipboard";
 import { importClipboardApiKeyAfterConfirmation, type AiConfigDeepLinkDraft } from "@/lib/ai/aiConfigDeepLink";
@@ -163,6 +164,7 @@ import {
   webdavSyncTest,
   webdavSyncUpload,
   listInstalledAgentsLocal,
+  listPlugins,
   type AppSupportInfo,
   type McpHttpServerSettings,
   type McpHttpServerStatus,
@@ -261,6 +263,7 @@ import { currentLocale, previewLocale, restoreLocalePreview, setLocale, type Loc
 import {
   SETTINGS_SEARCH_DEFINITIONS,
   TOOLBAR_VISIBILITY_ITEMS,
+  createPluginToolbarCommandSearchDefinitions,
   createShortcutSettingsSearchDefinitions,
   resolveSettingsCategory,
   resolveSettingsSearchEntries,
@@ -772,6 +775,34 @@ const editExportRowLimit = ref(settingsStore.editorSettings.exportRowLimit);
 const editQueryExportKeysetOptimizationEnabled = ref(settingsStore.editorSettings.queryExportKeysetOptimizationEnabled);
 const editUpdateDownloadSource = ref<UpdateDownloadSource>(settingsStore.editorSettings.updateDownloadSource);
 const editToolbarItems = ref({ ...settingsStore.editorSettings.toolbarItems });
+// §5.2：插件工具栏命令的可见性覆盖表（键 = `${pluginId}.${commandId}`，true=隐藏）。
+const editPluginToolbarHidden = ref<Record<string, boolean>>({ ...settingsStore.editorSettings.pluginToolbarHidden });
+// 已安装插件的 appToolbar 命令清单，驱动设置页开关与搜索条目；对话框打开时刷新。
+interface PluginToolbarCommandRow {
+  pluginId: string;
+  pluginName: string;
+  commandId: string;
+  label: string;
+}
+const pluginToolbarCommands = ref<PluginToolbarCommandRow[]>([]);
+async function refreshPluginToolbarCommands() {
+  try {
+    const installedPlugins = await listPlugins();
+    const registry = createFrontendPluginRegistry(installedPlugins, currentLocale());
+    pluginToolbarCommands.value = registry.listToolbarMenuCommands().map(({ plugin, command }) => ({
+      pluginId: plugin.manifest.id,
+      pluginName: plugin.manifest.name,
+      commandId: command.id,
+      label: command.label,
+    }));
+  } catch (cause) {
+    console.warn("[DBX][settings:plugin-toolbar-commands]", cause);
+    pluginToolbarCommands.value = [];
+  }
+}
+function pluginToolbarCommandKey(row: PluginToolbarCommandRow): string {
+  return `${row.pluginId}.${row.commandId}`;
+}
 const toolbarVisibilityItems = TOOLBAR_VISIBILITY_ITEMS;
 function getToolbarVisibilityItemLabel(item: ToolbarVisibilityItem): string {
   return toolbarVisibilityItemLabel(item, t);
@@ -1002,6 +1033,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     queryExportKeysetOptimizationEnabled: editQueryExportKeysetOptimizationEnabled.value,
     updateDownloadSource: editUpdateDownloadSource.value,
     toolbarItems: { ...editToolbarItems.value },
+    pluginToolbarHidden: { ...editPluginToolbarHidden.value },
     snippets: editSnippets.value,
     sqlShortcuts: editSqlShortcuts.value,
     sqlVariableSubstitutionEnabled: editSqlVariableSubstitutionEnabled.value,
@@ -1641,6 +1673,7 @@ function syncEditorSettingsDraftFromStore() {
   editQueryExportKeysetOptimizationEnabled.value = settingsStore.editorSettings.queryExportKeysetOptimizationEnabled;
   editUpdateDownloadSource.value = settingsStore.editorSettings.updateDownloadSource;
   editToolbarItems.value = { ...settingsStore.editorSettings.toolbarItems };
+  editPluginToolbarHidden.value = { ...settingsStore.editorSettings.pluginToolbarHidden };
   editSnippets.value = settingsStore.editorSettings.snippets.map(editableSnippet);
   editSqlShortcuts.value = mergeDefaultSqlShortcuts(settingsStore.editorSettings.sqlShortcuts.map(editableSqlShortcut));
   editSqlVariableSubstitutionEnabled.value = settingsStore.editorSettings.sqlVariableSubstitutionEnabled;
@@ -1768,6 +1801,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   globalDateTimeImportFormat: editGlobalDateTimeImportFormat,
   updateDownloadSource: editUpdateDownloadSource,
   toolbarItems: editToolbarItems,
+  pluginToolbarHidden: editPluginToolbarHidden,
   snippets: editSnippets,
   sqlShortcuts: editSqlShortcuts,
   sqlVariableSubstitutionEnabled: editSqlVariableSubstitutionEnabled,
@@ -1789,6 +1823,7 @@ function applyEditorSettingsKeysToRefs(draft: EditorSettingsDraft, keys: readonl
     sidebarHiddenTablePrefixes: (value) => (value as string[]).join("\n"),
     redisKeyTemplates: (value) => normalizeRedisKeyTemplates(value as string[]).join("\n"),
     toolbarItems: (value) => ({ ...(value as EditorSettings["toolbarItems"]) }),
+    pluginToolbarHidden: (value) => ({ ...(value as EditorSettings["pluginToolbarHidden"]) }),
     snippets: (value) => (value as SqlSnippet[]).map(editableSnippet),
     sqlShortcuts: (value) => mergeDefaultSqlShortcuts((value as SqlShortcutAction[]).map(editableSqlShortcut)),
     sqlVariableSyntaxOverrides: (value) => normalizeSqlVariableSyntaxOverrides(value as EditorSettings["sqlVariableSyntaxOverrides"]),
@@ -1804,6 +1839,7 @@ watch(
   (open) => {
     if (open) {
       syncEditorSettingsDraftFromStore();
+      void refreshPluginToolbarCommands();
       editShowTrayIcon.value = settingsStore.desktopSettings.show_tray_icon;
       editQuitOnClose.value = settingsStore.desktopSettings.quit_on_close;
       editIconTheme.value = settingsStore.desktopSettings.icon_theme;
@@ -2188,6 +2224,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editSidebarCopyTableNameSeparator.value = DEFAULT_EDITOR_SETTINGS.sidebarCopyTableNameSeparator;
     editSidebarCopyTableNameIncludeSchema.value = DEFAULT_EDITOR_SETTINGS.sidebarCopyTableNameIncludeSchema;
     editToolbarItems.value = { ...DEFAULT_EDITOR_SETTINGS.toolbarItems };
+    editPluginToolbarHidden.value = { ...DEFAULT_EDITOR_SETTINGS.pluginToolbarHidden };
   } else if (tab === "data") {
     editShowColumnCommentsInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader;
     editShowColumnTypesInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnTypesInHeader;
@@ -2366,6 +2403,7 @@ function resetAllDefaults() {
   editQueryExportKeysetOptimizationEnabled.value = DEFAULT_EDITOR_SETTINGS.queryExportKeysetOptimizationEnabled;
   editUpdateDownloadSource.value = DEFAULT_EDITOR_SETTINGS.updateDownloadSource;
   editToolbarItems.value = { ...DEFAULT_EDITOR_SETTINGS.toolbarItems };
+  editPluginToolbarHidden.value = { ...DEFAULT_EDITOR_SETTINGS.pluginToolbarHidden };
   editSnippets.value = DEFAULT_SQL_SNIPPETS.map((s) => ({ ...s }));
   editSqlShortcuts.value = DEFAULT_SQL_SHORTCUTS.map(editableSqlShortcut);
 }
@@ -2798,7 +2836,7 @@ const settingsSearchHighlightClasses = ["rounded-md", "bg-primary/5", "transitio
 const settingsSearchCategoryLabels = computed(() => Object.fromEntries(settingsCategoryNav.value.map((category) => [category.value, category.label])) as Record<SettingsCategory, string>);
 const settingsSearchEntries = computed(() =>
   resolveSettingsSearchEntries(
-    [...SETTINGS_SEARCH_DEFINITIONS, ...createShortcutSettingsSearchDefinitions(SHORTCUT_DEFINITIONS)],
+    [...SETTINGS_SEARCH_DEFINITIONS, ...createShortcutSettingsSearchDefinitions(SHORTCUT_DEFINITIONS), ...createPluginToolbarCommandSearchDefinitions(pluginToolbarCommands.value)],
     {
       isWeb,
       hasSqlServerConnection: hasSqlServerConnection.value,
@@ -6844,6 +6882,25 @@ onUnmounted(() => {
                     <Label :for="`toolbar-${item.key}`" class="text-sm cursor-pointer">{{ getToolbarVisibilityItemLabel(item) }}</Label>
                   </div>
                 </div>
+                <template v-if="pluginToolbarCommands.length > 0">
+                  <div class="flex items-center gap-2 pt-1">
+                    <Label>{{ t("settings.pluginToolbarCommands") }}</Label>
+                    <HelpTooltip :label="t('settings.pluginToolbarCommands')" content-class="max-w-64">
+                      <p>{{ t("settings.pluginToolbarCommandsHint") }}</p>
+                    </HelpTooltip>
+                  </div>
+                  <div class="grid grid-cols-3 gap-2">
+                    <div v-for="row in pluginToolbarCommands" :key="pluginToolbarCommandKey(row)" class="flex items-center gap-2">
+                      <Switch :id="`toolbar-plugin-${pluginToolbarCommandKey(row)}`" :model-value="editPluginToolbarHidden[pluginToolbarCommandKey(row)] !== true" @update:model-value="(v: boolean) => (editPluginToolbarHidden[pluginToolbarCommandKey(row)] = !v)" />
+                      <div class="min-w-0">
+                        <Label :for="`toolbar-plugin-${pluginToolbarCommandKey(row)}`" class="block cursor-pointer text-sm">
+                          <span class="block truncate">{{ row.label }}</span>
+                        </Label>
+                        <p class="truncate text-xs text-muted-foreground">{{ row.pluginName }}</p>
+                      </div>
+                    </div>
+                  </div>
+                </template>
               </div>
             </section>
 
