@@ -9,16 +9,16 @@ import { ref } from "vue";
 import { uuid } from "@/lib/common/utils";
 
 export interface PluginDockEntry {
-  /** 宿主生成的稳定实例 id，同时作为该条目 workbench 的 workbenchId。 */
+  /** Host-generated stable instance id; doubles as the entry workbench's workbenchId. */
   id: string;
   pluginId: string;
   workbenchContributionId: string;
   kind: "command" | "connection";
-  /** 来源命令短 id（kind=command 时存在），供通用「+」重放。 */
+  /** Source command short id (present for kind=command), replayed by the generic "+". */
   commandId?: string;
   title: string;
   icon?: string;
-  /** 宿主权威 context：workbenchId=id、restored=false、surface="panel"。 */
+  /** Host-authored context: workbenchId=id, restored=false, surface="panel". */
   context: Record<string, unknown>;
 }
 
@@ -40,8 +40,8 @@ export interface AddPluginDockEntryPayload {
 /** Creates (and activates) a dock terminal entry; returns its stable id. */
 export function addPluginDockEntry(payload: AddPluginDockEntryPayload): string {
   const id = uuid();
-  // 同一命令已存在条目时标题追加序号（通用：Local terminal 1 / 2 …），
-  // 避免多实例面板在 tab 条上无法区分。
+  // Same-command entries get a sequence suffix in the title (generic: "Local terminal 1 / 2 ..."),
+  // keeps multi-instance panels distinguishable in the tab strip.
   const siblings = dockEntries.value.filter((entry) => entry.pluginId === payload.pluginId && entry.commandId === payload.commandId);
   const title = siblings.length ? `${payload.title} ${siblings.length + 1}` : payload.title;
   dockEntries.value.push({

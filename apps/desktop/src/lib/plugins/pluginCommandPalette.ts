@@ -1,7 +1,7 @@
-// commandPalette surface（HOST_PLUGIN_UI_SPEC §5）：把插件 `menus` 贡献中
-// location === "commandPalette" 的命令声明派生为 quick-open 条目，执行时统一走
-// executePluginCommand 的宿主权威链路（命令/工作台重解析、context 注入都在那里）。
-// 纯通用逻辑：label / 描述 / 来源全部来自清单声明，不含任何业务专属字段。
+// commandPalette surface (HOST_PLUGIN_UI_SPEC §5): map the plugin's `menus` contribution —
+// commands with location === "commandPalette" derive into quick-open entries; execution goes through
+// the host-authoritative executePluginCommand chain (command/workbench re-validation and context injection live there).
+// Purely generic logic: label/description/provenance all come from registry declarations — no business-specific fields.
 import { onScopeDispose, ref, shallowRef, watch } from "vue";
 import * as api from "@/lib/backend/api";
 import i18n from "@/i18n";
@@ -11,14 +11,14 @@ import { useQueryStore } from "@/stores/queryStore";
 import type { InstalledPlugin, PluginCommandContribution } from "@/types/database";
 import type { QuickOpenItem } from "@/composables/useQuickOpen";
 
-/** FrontendPluginRegistry.listPaletteMenuCommands() 的返回条目形状。 */
+/** Entry shape returned by FrontendPluginRegistry.listPaletteMenuCommands(). */
 export interface PluginPaletteCommandEntry {
   plugin: InstalledPlugin;
   command: PluginCommandContribution;
   order: number;
 }
 
-/** 由 palette 声明派生 quick-open 条目：label 为命令文案，出处提示走 description 与右侧插件名徽标。 */
+/** Derives quick-open entries from palette declarations: label = command copy, provenance via description and the right-side plugin-name badge. */
 export function pluginCommandPaletteItems(entries: readonly PluginPaletteCommandEntry[]): QuickOpenItem[] {
   return entries.map(({ plugin, command }) => ({
     id: `plugin-command-${plugin.manifest.id}-${command.id}`,
@@ -29,19 +29,19 @@ export function pluginCommandPaletteItems(entries: readonly PluginPaletteCommand
     pluginId: plugin.manifest.id,
     commandId: command.id,
     pluginName: plugin.manifest.name,
-    // 搜索匹配：命令 label、描述与来源插件名都参与 quick-open 的匹配/拼音检索。
+    // Search matching: command label, description and source plugin name all participate in quick-open matching/pinyin.
     searchText: [command.label, command.description, plugin.manifest.name].filter(Boolean).join(" "),
   }));
 }
 
 /**
- * 插件命令面板数据源：清单随已安装插件派生，安装/卸载/替换（插件中心广播
- * dbx:plugins-changed）、窗口重新聚焦或界面语言变化时刷新。执行时惰性取
- * queryStore（与 usePluginToolbarCommands 相同做法，纯宿主环境无需 Pinia）。
+ * Plugin command palette data source: derived from installed plugins; on install/uninstall/replace (plugin center broadcasts
+ * dbx:plugins-changed), window focus or locale change. Execution lazily resolves
+ * queryStore (same approach as usePluginToolbarCommands; plain host tests need no Pinia).
  */
 export function usePluginCommandPalette() {
   const items = ref<QuickOpenItem[]>([]);
-  // shallowRef：Registry 是带私有字段的类实例，deep ref 的 UnwrapRef 会破坏其名义类型。
+  // shallowRef: the registry is a class instance with private fields — a deep ref's UnwrapRef would break其名义类型。
   const registry = shallowRef<FrontendPluginRegistry | null>(null);
 
   async function refresh(): Promise<void> {
@@ -57,7 +57,7 @@ export function usePluginCommandPalette() {
     }
   }
 
-  /** 执行 quick-open 中的一条插件命令；错误经返回值交调用方提示。 */
+  /** Executes one plugin command from quick-open; errors are returned to the caller for display. */
   function open(item: QuickOpenItem): PluginCommandExecutionResult {
     if (item.type !== "plugin_command" || !item.pluginId || !item.commandId) return { error: "Item is not a plugin command" };
     if (!registry.value) return { error: "Plugin registry is not ready" };

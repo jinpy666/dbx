@@ -79,12 +79,12 @@ describe("normalizeEditorSettings", () => {
   });
 
   it("normalizes plugin toolbar visibility overrides and tolerates malformed values", () => {
-    // 缺省：无任何覆盖，全部跟随 manifest default_visible。
+    // default: no overrides at all — everything follows manifest default_visible.
     expect(normalizeEditorSettings({}).pluginToolbarHidden).toEqual({});
     expect(normalizeEditorSettings({ pluginToolbarHidden: null } as any).pluginToolbarHidden).toEqual({});
     expect(normalizeEditorSettings({ pluginToolbarHidden: ["a.b"] } as any).pluginToolbarHidden).toEqual({});
     expect(normalizeEditorSettings({ pluginToolbarHidden: "yes" } as any).pluginToolbarHidden).toEqual({});
-    // 合法 boolean 覆盖保留；非法键值、空键直接丢弃。
+    // valid boolean overrides are kept; invalid keys/values and empty keys are dropped.
     expect(
       normalizeEditorSettings({
         pluginToolbarHidden: {

@@ -79,13 +79,13 @@ const emit = defineEmits<{
 const { t } = useI18n();
 const { toast } = useToast();
 
-// PR-A4 appToolbar surface（HOST_PLUGIN_UI_SPEC §5.1）：插件命令以图标形式
-// 与设置/AI 同区展示；点击执行命令（presentation: panel → 全局底部 Dock），
-// 对已打开的 Dock 命令再点一次即收起。
+// PR-A4 appToolbar surface (HOST_PLUGIN_UI_SPEC §5.1): plugin commands render as icons
+// surface (next to Settings/AI); clicking runs the command (presentation: panel -> the global bottom dock),
+// clicking again collapses an open dock command.
 const { entries: pluginCommandEntries, open: openPluginCommand } = usePluginToolbarCommands();
 const { visible: dockVisible } = usePluginBottomDock();
-// 工具栏图标 = 终端面板显示/隐藏开关（终端会话常驻，隐藏不杀）；面板空时
-// 首次点击执行首个插件命令（panel → 新建本地终端并显示）。
+// The toolbar icon toggles panel visibility (terminal sessions survive hiding); with an empty panel
+// the first click runs the first plugin command (panel -> adds a local terminal and shows it).
 function togglePluginCommand(entry: PluginToolbarCommandEntry) {
   if (dockVisible.value) {
     setDockVisible(false);
@@ -96,8 +96,8 @@ function togglePluginCommand(entry: PluginToolbarCommandEntry) {
 }
 const settingsStore = useSettingsStore();
 const toolbarItems = computed(() => settingsStore.editorSettings.toolbarItems);
-// §5.2：渲染 = manifest default_visible（usePluginToolbarCommands 已过滤）且
-// 未被设置页隐藏（pluginToolbarHidden 键 = `${pluginId}.${commandId}`）。
+// §5.2: render = manifest default_visible (already filtered by usePluginToolbarCommands) and
+// hidden via the settings page (pluginToolbarHidden key = `${pluginId}.${commandId}`).
 const visiblePluginCommandEntries = computed(() => {
   const hidden = settingsStore.editorSettings.pluginToolbarHidden;
   return pluginCommandEntries.value.filter((entry) => !hidden[`${entry.pluginId}.${entry.commandId}`]);

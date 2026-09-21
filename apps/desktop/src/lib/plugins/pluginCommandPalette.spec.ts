@@ -5,9 +5,9 @@ import { createFrontendPluginRegistry } from "./frontendPlugin";
 import { pluginCommandPaletteItems, usePluginCommandPalette, type PluginPaletteCommandEntry } from "./pluginCommandPalette";
 import type { InstalledPlugin, PluginCommandContribution, PluginMenusContribution, PluginWorkbenchContribution } from "@/types/database";
 
-// commandPalette surface（HOST_PLUGIN_UI_SPEC §5）：registry 侧按 order + 全限
-// 定命令 id 稳定排序派生 palette 命令；quick-open 条目携带来源提示；执行统一走
-// executePluginCommand 的宿主权威链路；插件清单变化经 dbx:plugins-changed 刷新。
+// commandPalette surface (HOST_PLUGIN_UI_SPEC §5): the registry derives palette commands by order + fully
+// fully qualified command id for a stable order; quick-open entries carry provenance and execution goes through
+// the host-authoritative executePluginCommand chain; plugin list changes refresh via dbx:plugins-changed.
 function installedPlugin(id: string, contributions: InstalledPlugin["manifest"]["contributions"] = []): InstalledPlugin {
   return {
     compatibility: { compatible: true },
@@ -72,7 +72,7 @@ describe("FrontendPluginRegistry.listPaletteMenuCommands", () => {
         testCommand("zeta", "Zeta"),
         testCommand("alpha", "Alpha"),
         menusContribution([
-          // palette 项没有 default_visible（§5.2 的缺省隐藏只约束工具栏）。
+          // palette items have no default_visible (§5.2 hidden-by-default only constrains toolbar items).
           { location: "commandPalette", command: "zeta", group: "primary", order: 10 },
           { location: "commandPalette", command: "alpha", group: "primary", order: 10 },
         ]),

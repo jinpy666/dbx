@@ -906,7 +906,7 @@ export interface EditorSettings {
   updateDownloadSource: UpdateDownloadSource;
   ignoredUpdateVersion: string;
   toolbarItems: ToolbarItems;
-  /** 插件工具栏命令的可见性覆盖表；键 = `${pluginId}.${commandId}`，true=隐藏，缺省跟随 manifest default_visible。 */
+  /** Visibility overrides for plugin toolbar commands; key = `${pluginId}.${commandId}`, true = hidden, defaults follow manifest default_visible. */
   pluginToolbarHidden: Record<string, boolean>;
   objectBrowserShowCheckbox: boolean;
   objectBrowserViewMode: "list" | "grid";
@@ -1446,9 +1446,9 @@ function normalizeToolbarItems(items: Partial<ToolbarItems> | undefined): Toolba
 }
 
 /**
- * 插件工具栏命令的可见性覆盖表：键 = `${pluginId}.${commandId}`，true=隐藏，
- * false=显式显示，无键=跟随 manifest 的 default_visible。非法键值直接丢弃，
- * 使旧数据里的脏值回退到 manifest 缺省行为。
+ * Visibility overrides for plugin toolbar commands: key = `${pluginId}.${commandId}`, true = hidden,
+ * false = explicitly shown, missing = follow the manifest default_visible. Invalid keys/values are dropped,
+ * so dirty values in old data fall back to the manifest default behavior.
  */
 export function normalizePluginToolbarHidden(value: unknown): Record<string, boolean> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};

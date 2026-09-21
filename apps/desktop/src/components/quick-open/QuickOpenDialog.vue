@@ -23,8 +23,8 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
-// 插件 commandPalette 命令（HOST_PLUGIN_UI_SPEC §5）：作为 quick-open 补充条目
-// 接入；清单刷新由 dbx:plugins-changed / focus / 语言变化驱动，打开对话框时兜底再刷一次。
+// Plugin commandPalette commands (HOST_PLUGIN_UI_SPEC §5): injected as extra quick-open entries;
+// list refresh is driven by dbx:plugins-changed / focus / locale change, with a fallback refresh when the dialog opens.
 const pluginPalette = usePluginCommandPalette();
 const { toast } = useToast();
 const { searchQuery, filteredItems, selectedIndex, selectedItem, selectNext, selectPrevious, setQuery, loadExternalSqlFiles, contentMode, contentGroups, contentSelectedItem, contentSearching, setContentMode } = useQuickOpen({ extraItems: pluginPalette.items });
@@ -134,8 +134,8 @@ function handleKeyDown(e: KeyboardEvent): void {
 }
 
 function handleSelect(item: QuickOpenItem): void {
-  // 插件命令在本组件内闭环执行：不向 App.vue 的对象导航分发（那条链路按
-  // connectionId 走连接/展开逻辑，对命令条目无意义），执行错误用现有 toast 提示。
+  // Plugin commands execute inside this component: they are NOT dispatched to App.vue object navigation (that chain
+  // connectionId-based connection/expand logic is meaningless for command entries); execution errors surface via the existing toast.
   if (item.type === "plugin_command") {
     const result = pluginPalette.open(item);
     if (result.error) toast(result.error, 5000);
@@ -223,7 +223,7 @@ function getItemIcon(type: string) {
   return null;
 }
 
-/** 右侧徽标文案：插件命令显示来源插件名作为出处提示，其余沿用类型标签。 */
+/** Right badge copy: plugin commands show the source plugin name as provenance; others keep the type label. */
 function getTypeBadge(item: QuickOpenItem): string {
   if (item.type === "plugin_command") return item.pluginName || item.pluginId || "";
   return getTypeLabel(item.type);
@@ -237,7 +237,7 @@ watch(
       setContentMode(props.initialContentMode === true);
       searchSettingsOpen.value = false;
       refreshSearchSettings();
-      // 打开时兜底刷新插件命令清单（常规刷新由 dbx:plugins-changed 等事件驱动）。
+      // Fallback refresh of the plugin command list on open (regular refresh is event-driven via dbx:plugins-changed).
       void pluginPalette.refresh();
       // Eagerly load external SQL files so they appear in the initial list
       void loadExternalSqlFiles();

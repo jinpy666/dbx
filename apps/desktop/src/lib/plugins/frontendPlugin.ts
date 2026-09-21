@@ -115,10 +115,10 @@ export class FrontendPluginRegistry {
   }
 
   /**
-   * commandPalette 放置位（HOST_PLUGIN_UI_SPEC §5）：palette 声明不设
-   * default_visible 门槛（§5.2 只约束工具栏项缺省隐藏），全部命令先按 `order`
-   * 升序、再按全限定命令 id（`${pluginId}.${commandId}`）稳定排序，结果与
-   * 清单或安装顺序无关。
+   * commandPalette placements (HOST_PLUGIN_UI_SPEC §5): palette declarations have no
+   * a default_visible gate (§5.2 only mandates hidden-by-default for toolbar items). Commands sort by `order`
+   * ascending, then by the fully qualified command id (`${pluginId}.${commandId}`) for a stable order independent of
+   * manifest or install order.
    */
   listPaletteMenuCommands(): Array<{ plugin: InstalledPlugin; command: PluginCommandContribution; order: number }> {
     const result: Array<{ plugin: InstalledPlugin; command: PluginCommandContribution; order: number }> = [];
@@ -144,14 +144,14 @@ export class FrontendPluginRegistry {
   }
 }
 
-/** menus 贡献没有自身 label（文案来自其引用的 command），排序键退化为 id。 */
+/** menus contributions carry no label of their own (copy comes from the referenced command); the sort key degrades to the id. */
 function pluginContributionSortLabel(contribution: PluginContribution): string {
   return (contribution as { label?: string }).label || contribution.id;
 }
 
 /**
- * §5.3/§5.4 条件求值（纯函数）：all 内隐式 AND；引用不存在 key 的子句对所有
- * 操作符均为 false。contextKeys 由宿主按场景提供快照。
+ * §5.3/§5.4 condition evaluation (pure): implicit AND within `all`; clauses referencing a missing key evaluate to false for all
+ * operators. contextKeys are snapshots provided by the host per scenario.
  */
 export function evaluatePluginCommandConditions(clauses: PluginConditionClause[] | undefined, contextKeys: PluginConditionContextKeys): boolean {
   return (clauses ?? []).every((clause) => {
@@ -163,7 +163,7 @@ export function evaluatePluginCommandConditions(clauses: PluginConditionClause[]
   });
 }
 
-/** placement 渲染门控：when 缺省可见；按 placement surface 快照求值。 */
+/** Placement render gate: when defaults to visible; evaluated against the placement surface snapshot. */
 function evaluateWhen(when: { all: PluginConditionClause[] } | undefined, surface: string): boolean {
   return evaluatePluginCommandConditions(when?.all, { surface });
 }

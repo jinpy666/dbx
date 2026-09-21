@@ -4,10 +4,10 @@ import { executePluginCommand } from "./pluginCommandRegistry";
 import { closePluginDockEntry, usePluginBottomDock } from "./pluginBottomDock";
 import type { InstalledPlugin, PluginMenusContribution } from "@/types/database";
 
-// PR-A4 command/menus 宿主侧（HOST_PLUGIN_UI_SPEC §4/§5/§8.3/§11）：命令注册
-// 表从已安装插件的静态声明派生工具栏入口；执行时以宿主权威 context 打开——
-// presentation: tab（缺省）开工作台 tab，panel 开全局底部 Dock；插件载荷在
-// context.plugin，workbenchId/restored/surface 由宿主注入、永不采信插件值。
+// PR-A4 command/menus host side (HOST_PLUGIN_UI_SPEC §4/§5/§8.3/§11): the command
+// the command registry derives toolbar entries from installed-plugin declarations; execution opens the workbench with a host-authored context —
+// presentation: tab (default) opens a workbench tab, panel opens the global bottom dock; the plugin payload rides under
+// context.plugin, while workbenchId/restored/surface are host-injected and never taken from the plugin.
 function installedPlugin(id: string, contributions: InstalledPlugin["manifest"]["contributions"] = []): InstalledPlugin {
   return {
     compatibility: { compatible: true },
@@ -63,7 +63,7 @@ describe("plugin command registry (PR-A4)", () => {
     expect(entries[0].plugin.manifest.id).toBe("io.dbx.ssh");
     expect(entries[0].command.id).toBe("open-local-terminal");
 
-    // §5.2：工具栏项缺省隐藏——default_visible 非 true 一律不渲染。
+    // §5.2: toolbar items default to hidden — anything without default_visible: true never renders.
     const hidden = createFrontendPluginRegistry([installedPlugin("io.dbx.ssh", [localTerminalCommand(), menusContribution([{ location: "appToolbar", command: "open-local-terminal", group: "navigation", order: 100 }])] as unknown as InstalledPlugin["manifest"]["contributions"])]);
     expect(hidden.listToolbarMenuCommands()).toHaveLength(0);
   });
@@ -78,7 +78,7 @@ describe("plugin command registry (PR-A4)", () => {
     expect(pluginId).toBe("io.dbx.ssh");
     expect(workbenchId).toBe("io.dbx.ssh.workbench");
     expect(options.forceNew).toBe(false);
-    // 插件载荷在 context.plugin；保留字段由宿主注入且覆盖插件伪造值。
+    // plugin payload under context.plugin; reserved fields are host-injected and override forged values.
     expect(options.context.plugin).toEqual({ mode: "local-terminal" });
     expect(typeof options.context.workbenchId).toBe("string");
     expect(options.context.restored).toBe(false);
@@ -104,21 +104,21 @@ describe("plugin command registry (PR-A4)", () => {
     expect(firstEntry.pluginId).toBe("io.dbx.ssh");
     expect(firstEntry.workbenchContributionId).toBe("io.dbx.ssh.workbench");
     expect(firstEntry.context.plugin).toEqual({ mode: "local-terminal" });
-    // 插件伪造的保留字段被宿主权威值覆盖；workbenchId = 条目 id 且稳定。
+    // plugin-forged reserved fields are overridden by host-authoritative values; workbenchId = entry id and stable.
     expect(firstEntry.context.workbenchId).toBe(firstEntry.id);
     expect(firstEntry.context.workbenchId).not.toBe("plugin-forged");
     expect(firstEntry.context.restored).toBe(false);
     expect(firstEntry.context.surface).toBe("panel");
     expect(activeEntryId.value).toBe(firstEntry.id);
 
-    // 再执行一次 → 新终端条目（VS Code + 语义），互不覆盖。
+    // a second execution adds another terminal entry (VS Code "+" semantics) without overwriting.
     executePluginCommand(registry, { openPluginWorkbench } as never, "io.dbx.ssh", "open-local-terminal");
     expect(entries.value).toHaveLength(2);
     expect(entries.value[1].id).not.toBe(firstEntry.id);
     expect(activeEntryId.value).toBe(entries.value[1].id);
     expect(openPluginWorkbench).not.toHaveBeenCalled();
 
-    // 关闭条目回收 tab；全部关闭后面板隐藏。
+    // closing an entry removes its tab; the panel hides once all entries are gone.
     closePluginDockEntry(entries.value[1].id);
     closePluginDockEntry(entries.value[0].id);
     expect(visible.value).toBe(false);
@@ -153,10 +153,10 @@ describe("plugin command registry (PR-A4)", () => {
     expect(evaluatePluginCommandConditions([{ key: "surface", operator: "equals", value: "tab" }], { surface: "tab" })).toBe(true);
     expect(evaluatePluginCommandConditions([{ key: "surface", operator: "notEquals", value: "tab" }], { surface: "tab" })).toBe(false);
     expect(evaluatePluginCommandConditions([{ key: "connection.state", operator: "oneOf", value: ["connected", "reconnecting"] }], { "connection.state": "connected" })).toBe(true);
-    // 空条件组缺省 true；缺失 key 一律 false（§5.3）。
+    // empty condition group defaults to true; a missing key is always false (§5.3).
     expect(evaluatePluginCommandConditions([], {})).toBe(true);
     expect(evaluatePluginCommandConditions([{ key: "object.type", operator: "equals", value: "table" }], {})).toBe(false);
-    // all 内隐式 AND。
+    // implicit AND within all.
     expect(
       evaluatePluginCommandConditions(
         [

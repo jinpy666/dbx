@@ -54,9 +54,9 @@ export interface PluginHostBridgeApi {
   /** Explicit user-triggered reconnect of an owned plugin connection (full flow, interactive password prompt allowed). */
   reopenConnection?(pluginId: string, connectionId: string): Promise<void>;
   /**
-   * PR-A4 通用扩展点：只读、无密钥的连接清单，仅返回「调用插件自己的
-   * connection-provider」名下的连接，供插件在面板/工作台内做连接切换等
-   * 自有业务（宿主不感知用途）。
+   * PR-A4 generic extension point: a read-only, secret-free connection list scoped to the calling plugin's own
+   * connection-providers, so plugins can implement their own connection switching inside panels/workbenches and
+   * their own business (the host stays unaware of the purpose).
    */
   listConnections?(pluginId: string): Array<{ id: string; name: string; providerId: string; connectionType?: string; readOnly: boolean }>;
   closeTab?(): Promise<void> | void;

@@ -491,19 +491,19 @@ export interface PluginOpenWorkbenchAction {
 
 export type PluginConditionOperator = "equals" | "notEquals" | "oneOf";
 
-/** §5.3 结构化条件子句；key/operator 为宿主保留词表，解析层已拒收未知值。 */
+/** §5.3 structured condition clause; key/operator are host-reserved word lists — unknown values were rejected at parse time. */
 export interface PluginConditionClause {
   key: string;
   operator: PluginConditionOperator;
   value: string | boolean | string[];
 }
 
-/** enablement/when 条件组：all 内隐式 AND；缺省（无字段）为 true。 */
+/** enablement/when condition group: implicit AND within `all`; absent field defaults to true. */
 export interface PluginCommandEnablement {
   all: PluginConditionClause[];
 }
 
-/** 条件求值上下文键快照（宿主按场景提供；引用缺失 key 的子句一律 false）。 */
+/** Context-key snapshot for condition evaluation (host-provided per scenario; clauses referencing a missing key are always false). */
 export type PluginConditionContextKeys = Record<string, string | boolean | undefined>;
 
 export interface PluginCommandContribution {
@@ -526,7 +526,7 @@ export interface PluginMenuItem {
   order: number;
   /** Toolbar entries default to hidden; sidebar entries default to visible. */
   default_visible?: boolean;
-  /** placement 可见条件（缺省 true）；与 command.enablement 独立求值。 */
+  /** Placement visibility condition (defaults to true); evaluated independently from command.enablement. */
   when?: PluginCommandEnablement;
 }
 

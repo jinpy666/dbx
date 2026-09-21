@@ -686,18 +686,18 @@ pub const PLUGIN_MENU_GROUPS: &[&str] = &["navigation", "primary", "secondary", 
 /// surfaces bounded regardless of what a manifest declares.
 pub const PLUGIN_MENUS_ITEMS_MAX: usize = 64;
 
-/// enablement/when 单组条件条数上限。
+/// Upper bound of clauses per enablement/when group.
 pub const PLUGIN_CONDITION_CLAUSES_MAX: usize = 16;
 
 /// Upper bound for one command's `context` JSON payload (serialized size).
 pub const PLUGIN_COMMAND_CONTEXT_MAX_BYTES: usize = 64 * 1024;
 
-/// 条件求值上下文键保留词表（HOST_PLUGIN_UI_SPEC §5.3 v1）。键外的值整个
-/// manifest 校验失败——不做"静默忽略"。
+/// Reserved context-key word list for condition evaluation (HOST_PLUGIN_UI_SPEC §5.3 v1). Values outside the
+/// list fail the whole manifest validation — never silently ignored.
 pub const PLUGIN_CONDITION_KEYS: &[&str] = &["connection.state", "object.type", "surface", "readOnly"];
 
-/// 单条命令条件（enablement/when 共用结构）。`value`：equals/notEquals 为
-/// 字符串；oneOf 为字符串数组。
+/// Single command condition clause (shared by enablement/when). `value` is a string for equals/notEquals
+/// string and a string array for oneOf.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginCommandConditionClause {
@@ -716,7 +716,7 @@ pub enum PluginConditionOperator {
     OneOf,
 }
 
-/// enablement/when 的条件组：all 内隐式 AND；字段缺省为 true。
+/// enablement/when condition group: implicit AND within `all`; absent field defaults to true.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginCommandEnablement {
@@ -789,7 +789,7 @@ pub struct PluginCommandContribution {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
     pub action: PluginCommandAction,
-    /// 可执行条件（缺省 true）；宿主执行前必须基于当前 context 快照重新求值。
+    /// Executable condition (defaults to true); the host must re-evaluate it against the current context snapshot before running the command.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enablement: Option<PluginCommandEnablement>,
 }
@@ -815,7 +815,7 @@ pub struct PluginMenuItem {
     /// Toolbar entries default to hidden; sidebar entries default to visible.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_visible: Option<bool>,
-    /// placement 可见条件（缺省 true）；与 command.enablement 独立求值。
+    /// Placement visibility condition (defaults to true); evaluated independently from command.enablement.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when: Option<PluginCommandEnablement>,
 }
@@ -1426,8 +1426,8 @@ fn validate_contributions(
     }
 }
 
-/// enablement/when 条件组校验：键/操作符在 v1 保留词表内、值形状匹配操作符
-/// （equals/notEquals=字符串，oneOf=非空字符串数组）、条数有界。
+/// enablement/when group validation: keys/operators must be in the v1 word lists, value shape must match the operator
+/// and a non-empty string array for oneOf; the clause count is bounded.
 fn validate_command_enablement(
     enablement: Option<&PluginCommandEnablement>,
     label: &str,
@@ -1454,7 +1454,7 @@ fn validate_command_enablement(
         let value_is_string_array = clause.value.as_array().is_some_and(|values| !values.is_empty() && values.iter().all(|value| value.is_string()));
         match clause.operator {
             PluginConditionOperator::Equals | PluginConditionOperator::NotEquals => {
-                // §5.3 示例含布尔值（readOnly notEquals true）——标量均可。
+                // §5.3 examples include booleans (readOnly notEquals true) — any scalar works.
                 if !value_is_scalar {
                     errors.push(format!("{label} condition '{}' requires a string or boolean value for equals/notEquals", clause.key));
                 }
@@ -1779,7 +1779,7 @@ mod tests {
         .unwrap();
         assert!(matches!(command, PluginContribution::Command(_)));
 
-        // 缺省值按契约：presentation=tab、reuse=singleton、restore=none。
+        // contract defaults: presentation=tab, reuse=singleton, restore=none.
         let command: PluginCommandContribution = serde_json::from_value(serde_json::json!({
             "id": "open-thing",
             "label": "Open",
@@ -1794,7 +1794,7 @@ mod tests {
         assert_eq!(action.reuse, PluginCommandReuse::Singleton);
         assert_eq!(action.restore, PluginCommandRestore::None);
 
-        // §11 冻结的 placement 词表保持 camelCase 原值。
+        // the frozen §11 placement vocabulary keeps the original camelCase values.
         let menus: PluginMenusContribution = serde_json::from_value(serde_json::json!({
             "id": "entrypoints",
             "items": [
@@ -1809,7 +1809,7 @@ mod tests {
         assert_eq!(menus.items[1].location, PluginMenuLocation::AppToolbar);
         assert_eq!(menus.items[2].location, PluginMenuLocation::AppSidebar);
 
-        // 未知贡献类型、未知 placement、未知枚举值全部拒收。
+        // unknown contribution types, placements and enum values all reject.
         assert!(serde_json::from_value::<PluginContribution>(serde_json::json!({ "type": "view", "id": "x" })).is_err());
         assert!(serde_json::from_value::<PluginMenuItem>(serde_json::json!({
             "location": "statusBar", "command": "x", "group": "primary", "order": 1
@@ -1826,7 +1826,7 @@ mod tests {
         let rpc: Result<PluginCommandAction, _> = serde_json::from_value(serde_json::json!({
             "type": "invoke-sidecar", "method": "x"
         }));
-        assert!(rpc.is_err(), "RPC 动作不属于 v1 契约");
+        assert!(rpc.is_err(), "RPC actions are outside the v1 contract");
     }
 
     #[test]
@@ -1854,7 +1854,7 @@ mod tests {
         validate_contributions(&[workbench, command, menus], false, true, &plugin_dir, &mut errors);
         assert!(errors.is_empty(), "{errors:?}");
 
-        // 键词表外的值拒收。
+        // keys outside the word list reject.
         let bad_key = serde_json::from_value::<PluginContribution>(serde_json::json!({
             "type": "command", "id": "cmd", "label": "C",
             "enablement": { "all": [ { "key": "custom.thing", "operator": "equals", "value": "x" } ] },
@@ -1865,7 +1865,7 @@ mod tests {
         validate_contributions(&[bad_key], false, true, &plugin_dir, &mut errors);
         assert!(errors.iter().any(|e| e.contains("outside the host word list")), "{errors:?}");
 
-        // 值形状与操作符不匹配拒收（oneOf 需非空字符串数组）。
+        // value shapes that mismatch the operator reject (oneOf needs a non-empty string array).
         let bad_value = serde_json::from_value::<PluginContribution>(serde_json::json!({
             "type": "menus", "id": "entrypoints",
             "items": [
@@ -1878,11 +1878,11 @@ mod tests {
         validate_contributions(&[bad_value], false, true, &plugin_dir, &mut errors);
         assert!(errors.iter().any(|e| e.contains("non-empty string array")), "{errors:?}");
 
-        // 条数上限拒收。
+        // clause-count cap rejects.
         let clauses: Vec<serde_json::Value> = (0..20)
             .map(|index| serde_json::json!({ "key": "surface", "operator": "equals", "value": "tab", "__i": index }))
             .collect();
-        // __i 为未知字段，去掉；改为 20 条合法 surface 条件。
+        // __i is an unknown field; drop it and use 20 valid surface clauses instead.
         let clauses: Vec<serde_json::Value> = (0..20)
             .map(|_| serde_json::json!({ "key": "surface", "operator": "equals", "value": "tab" }))
             .collect();
@@ -1901,7 +1901,7 @@ mod tests {
     fn command_and_menus_validation_rejects_dangling_and_off_wordlist_values() {
         let plugin_dir = std::env::temp_dir();
 
-        // 合法最小集：command + workbench + menus → 零错误。
+        // valid minimal set: command + workbench + menus -> zero errors.
         let valid = vec![
             serde_json::from_value::<PluginContribution>(serde_json::json!({
                 "type": "workbench", "id": "io.dbx.ssh.workbench", "label": "SSH"
@@ -1924,7 +1924,7 @@ mod tests {
         validate_contributions(&valid, false, true, &plugin_dir, &mut errors);
         assert!(errors.is_empty(), "unexpected errors: {errors:?}");
 
-        // 悬空 command 引用拒收。
+        // dangling command references reject.
         let dangling = vec![serde_json::from_value::<PluginContribution>(serde_json::json!({
             "type": "menus", "id": "entrypoints",
             "items": [{ "location": "appSidebar", "command": "missing", "group": "primary", "order": 100 }]
@@ -1934,7 +1934,7 @@ mod tests {
         validate_contributions(&dangling, false, true, &plugin_dir, &mut errors);
         assert!(errors.iter().any(|error| error.contains("references missing command 'missing'")), "{errors:?}");
 
-        // command 悬空 workbench 引用拒收。
+        // dangling command workbench references reject.
         let dangling = vec![serde_json::from_value::<PluginContribution>(serde_json::json!({
             "type": "command", "id": "cmd", "label": "C",
             "action": { "type": "open-workbench", "workbench": "missing.workbench" }
@@ -1944,7 +1944,7 @@ mod tests {
         validate_contributions(&dangling, false, true, &plugin_dir, &mut errors);
         assert!(errors.iter().any(|error| error.contains("references missing workbench")), "{errors:?}");
 
-        // group 词表外的值拒收；commandPalette 上的 default_visible 拒收。
+        // groups outside the word list reject; default_visible on commandPalette rejects.
         let menus: PluginMenusContribution = serde_json::from_value(serde_json::json!({
             "id": "entrypoints",
             "items": [
@@ -1959,7 +1959,7 @@ mod tests {
         assert!(errors.iter().any(|error| error.contains("outside the host word list")), "{errors:?}");
         assert!(errors.iter().any(|error| error.contains("no visibility toggle")), "{errors:?}");
 
-        // 超 64 KiB 的 command context 拒收。
+        // command contexts over 64 KiB reject.
         let big: PluginCommandContribution = serde_json::from_value(serde_json::json!({
             "id": "cmd", "label": "C",
             "action": { "type": "open-workbench", "workbench": "wb", "context": { "blob": "x".repeat(70_000) } }

@@ -775,9 +775,9 @@ const editExportRowLimit = ref(settingsStore.editorSettings.exportRowLimit);
 const editQueryExportKeysetOptimizationEnabled = ref(settingsStore.editorSettings.queryExportKeysetOptimizationEnabled);
 const editUpdateDownloadSource = ref<UpdateDownloadSource>(settingsStore.editorSettings.updateDownloadSource);
 const editToolbarItems = ref({ ...settingsStore.editorSettings.toolbarItems });
-// §5.2：插件工具栏命令的可见性覆盖表（键 = `${pluginId}.${commandId}`，true=隐藏）。
+// §5.2: visibility overrides for plugin toolbar commands (key = `${pluginId}.${commandId}`, true = hidden).
 const editPluginToolbarHidden = ref<Record<string, boolean>>({ ...settingsStore.editorSettings.pluginToolbarHidden });
-// 已安装插件的 appToolbar 命令清单，驱动设置页开关与搜索条目；对话框打开时刷新。
+// appToolbar command list of installed plugins drives the settings toggles and search entries; refreshed when the dialog opens.
 interface PluginToolbarCommandRow {
   pluginId: string;
   pluginName: string;

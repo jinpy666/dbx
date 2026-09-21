@@ -81,7 +81,7 @@ function createBridge() {
       openWorkbench: async (pluginId, contributionId, context, options) => emit("openWorkbench", pluginId, contributionId, context, options),
       openFilesystem: async (pluginId, providerId, context) => emit("openFilesystem", pluginId, providerId, context),
       reopenConnection: (pluginId, connectionId) => useConnectionStore().reopenPluginConnection(connectionId, pluginId),
-      // PR-A4 通用扩展点：只读、无密、按插件限定的连接清单（面板内连接切换用）。
+      // PR-A4 generic extension point: a read-only, secret-free, plugin-scoped connection list (for in-panel connection switching).
       listConnections: (ownerPluginId) => {
         const providerIds = new Set((props.plugin.manifest.contributions || []).filter((candidate) => candidate.type === "connection-provider").map((candidate) => candidate.id));
         if (ownerPluginId !== props.plugin.manifest.id) return [];

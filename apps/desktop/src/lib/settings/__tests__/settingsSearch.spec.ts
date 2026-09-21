@@ -249,7 +249,7 @@ describe("settings search", () => {
       { id: "appearance-plugin-toolbar-dbx-logs.tail", category: "appearance", title: "Tail Logs", description: "Log Viewer", targetId: "appearance" },
     ]);
 
-    // 命令 label 与插件名（副文本）都可命中搜索。
+    // both the command label and the plugin name (subtext) match searches.
     const entries = resolveSettingsSearchEntries(definitions, { isWeb: false, visibleCategories: new Set<SettingsCategory>(["appearance"]) }, (key) => key, categoryLabels);
     expect(searchSettings(entries, "terminal", "en").map((entry) => entry.id)).toEqual(["appearance-plugin-toolbar-dbx-terminal.openTerminal"]);
     expect(searchSettings(entries, "assistant", "en").map((entry) => entry.id)).toEqual(["appearance-plugin-toolbar-dbx-ai.run"]);

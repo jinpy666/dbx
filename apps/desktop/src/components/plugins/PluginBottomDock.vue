@@ -1,9 +1,9 @@
 <script setup lang="ts">
-// PR-A4/P2 全局底部面板 Dock（HOST_PLUGIN_UI_SPEC §8.3）——通用宿主容器：
-// 只负责面板框架（tab 条、拖拽高度、收起/最大化/隐藏）与承载任意插件的
-// panel webview，不含任何插件业务；多终端/shell 选择/连接切换等全部由插件
-// 在自己的 panel 页面里实现（通过桥 openWorkbench 再开一个面板条目）。
-// 每个条目持有宿主生成的稳定 workbenchId，切换用 v-show 保活（会话不停）。
+// PR-A4/P2 global bottom panel dock (HOST_PLUGIN_UI_SPEC §8.3) — a generic host container:
+// it only provides the panel frame (tab strip, drag-resize height, collapse/maximize/hide) and hosts any plugin's
+// panel webviews, with zero plugin business inside; multi-terminal/shell selection/connection switching all live in the plugin
+// the plugin's own panel page via the bridge openWorkbench, which adds another dock entry).
+// Each entry owns a host-stable workbenchId; v-show keeps sessions alive while switching tabs.
 import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { ChevronDown, ChevronUp, Maximize2, Minimize2, Plus, X } from "@lucide/vue";
@@ -54,8 +54,8 @@ function definitionFor(pluginId: string): InstalledPlugin | undefined {
   return plugins.value.find((candidate) => candidate.manifest.id === pluginId);
 }
 
-// 通用「+」：重放当前面板条目来源的命令（无业务语义；多终端/shell 选择等
-// 由插件在自己 panel 页面里通过桥 openWorkbench 再开面板条目）。
+// Generic "+": replays the command the active entry came from (no business semantics; multi-terminal/shell
+// the plugin's own panel page opens additional dock entries via the bridge openWorkbench).
 function rerunActiveCommand() {
   const entry = activeEntry.value;
   const command = activeCommand.value;
@@ -64,8 +64,8 @@ function rerunActiveCommand() {
   if (result.error) console.warn("[DBX][plugin:dock]", result.error);
 }
 
-// 面板 webview 内的插件经桥 openWorkbench 请求再开面板：宿主重建权威
-// context（丢弃插件传入的保留字段），新增一个通用面板条目。
+// A dock-hosted webview asking for another panel via the bridge openWorkbench: the host rebuilds the authoritative
+// context (dropping plugin-supplied reserved fields) and adds one generic panel entry.
 function onPanelOpenWorkbench(entry: (typeof entries.value)[number], _contributionId: string, childContext?: Record<string, unknown>) {
   const payload = childContext && typeof childContext === "object" && !Array.isArray(childContext) ? { ...childContext } : {};
   delete payload.workbenchId;
@@ -81,14 +81,14 @@ function onPanelOpenWorkbench(entry: (typeof entries.value)[number], _contributi
   activatePluginDockEntry(id);
 }
 
-// 隐藏面板：终端会话保留（VS Code 语义），重开工具栏图标即恢复。
+// Hide the panel: terminal sessions survive (VS Code semantics); the toolbar icon restores it.
 function hideDock() {
   collapsed.value = false;
   setDockMaximized(false);
   setDockVisible(false);
 }
 
-// 顶边拖拽调整高度（min 140px，至多窗口 80%）。
+// Drag the top edge to resize the height (min 140px, up to 80% of the window).
 const resizing = ref(false);
 function startResize(event: PointerEvent) {
   event.preventDefault();

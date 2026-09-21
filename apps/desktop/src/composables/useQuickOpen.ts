@@ -46,15 +46,15 @@ export interface QuickOpenItem {
   matchText?: string; // For content matches: matched slice
   lineText?: string; // For content matches: full matching line
   highlightIndices?: [number, number]; // For content matches: [start, end) chars into lineText to highlight
-  pluginId?: string; // For plugin commands: 来源插件 id
-  commandId?: string; // For plugin commands: 命令贡献短 id
-  pluginName?: string; // For plugin commands: 来源插件显示名（出处提示）
+  pluginId?: string; // For plugin commands: source plugin id
+  commandId?: string; // For plugin commands: short id of the command contribution
+  pluginName?: string; // For plugin commands: source plugin display name (provenance hint)
 }
 
 export interface UseQuickOpenOptions {
   /**
-   * 外部补充条目（如插件 commandPalette 命令）：并入初始列表与搜索结果池，
-   * 由调用方负责刷新；无查询时按注入顺序追加在既有条目之后。
+   * External extra entries (e.g. plugin commandPalette commands): merged into the initial list and the search result pool,
+   * refreshed by the caller; with no query they are appended after the built-in entries in injection order.
    */
   extraItems?: Ref<QuickOpenItem[]>;
 }

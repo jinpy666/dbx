@@ -121,7 +121,7 @@ const selectedEntry = computed(() => connectionProviders.value.find((entry) => e
 const selectedDefinition = computed(() => definitions.value.find((definition) => definition.plugin.manifest.id === selectedPluginId.value) || null);
 const selectedWorkbenches = computed(() => registry.value.listWorkbenches().filter((entry) => entry.plugin.manifest.id === selectedPluginId.value));
 const selectedFilesystems = computed(() => registry.value.listFilesystemProviders().filter((entry) => entry.plugin.manifest.id === selectedPluginId.value));
-// PR-A4：声明了 command 的插件由命令驱动快捷入口（打开工作台路由到命令、不再提供 SFTP 浏览入口）。
+// PR-A4: plugins declaring commands drive their quick entries via commands (workbench opens route to the command; the SFTP browse entry is retired).
 const selectedHasCommands = computed(() => registry.value.listCommands().some((entry) => entry.plugin.manifest.id === selectedPluginId.value));
 const providerConnections = computed(() => {
   const entry = selectedEntry.value;
@@ -480,8 +480,8 @@ async function openFilesystem(pluginId: string, providerId: string, label: strin
 }
 
 function openWorkbench(pluginId: string, contributionId: string, label: string) {
-  // PR-A4：插件声明了指向该工作台的 command 时，入口按声明的命令打开
-  // （宿主权威 context——SSH 插件即直接进入本地终端）；未声明保持旧行为。
+  // PR-A4: when the plugin declares a command targeting this workbench, the entry opens through it
+  // host-authored context — the SSH plugin lands directly in the local terminal); otherwise the legacy behavior applies.
   const command = registry.value.findCommandTargetingWorkbench(pluginId, contributionId);
   if (command) {
     const result = executePluginCommand(registry.value, queryStore, pluginId, command.id);

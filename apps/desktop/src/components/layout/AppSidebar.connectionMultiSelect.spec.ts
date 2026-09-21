@@ -8,8 +8,8 @@ const mocks = vi.hoisted(() => ({
   toast: vi.fn(),
 }));
 
-// PR-A4：AppSidebar 现在经 pluginCommandRegistry 引入 useQueryStore/useI18n
-// 链路，这里对 vue-i18n 做 partial mock，保留其余导出（如 createI18n）。
+// PR-A4: AppSidebar now pulls useQueryStore/useI18n chains through
+// chains, so partially mock vue-i18n here while keeping the other exports (e.g. createI18n).
 vi.mock("vue-i18n", async (importOriginal) => ({
   ...(await importOriginal<typeof import("vue-i18n")>()),
   useI18n: () => ({ t: (key: string) => key, locale: { value: "en" } }),
