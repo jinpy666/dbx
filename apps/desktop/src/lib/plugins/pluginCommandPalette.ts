@@ -41,7 +41,7 @@ export function pluginCommandPaletteItems(entries: readonly PluginPaletteCommand
  */
 export function usePluginCommandPalette() {
   const items = ref<QuickOpenItem[]>([]);
-  // shallowRef: the registry is a class instance with private fields — a deep ref's UnwrapRef would break其名义类型。
+  // shallowRef: the registry is a class instance with private fields — a deep ref's UnwrapRef would break its nominal type.
   const registry = shallowRef<FrontendPluginRegistry | null>(null);
 
   async function refresh(): Promise<void> {
