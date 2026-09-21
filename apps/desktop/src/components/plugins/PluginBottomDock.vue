@@ -11,6 +11,8 @@ import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import PluginIcon from "@/components/plugins/PluginIcon.vue";
 import PluginWorkbenchHost from "@/components/plugins/PluginWorkbenchHost.vue";
+import LightDropdown from "@/components/ui/LightDropdown.vue";
+import { useConnectionStore } from "@/stores/connectionStore";
 import { activatePluginDockEntry, addPluginDockEntry, closePluginDockEntry, setDockMaximized, setDockVisible, usePluginBottomDock } from "@/lib/plugins/pluginBottomDock";
 import { executePluginCommand } from "@/lib/plugins/pluginCommandRegistry";
 import { createFrontendPluginRegistry } from "@/lib/plugins/frontendPlugin";
@@ -36,6 +38,7 @@ const activeCommand = computed(() => {
 });
 
 watch(entries, () => void loadPluginData(), { deep: true, immediate: true });
+watch([activeEntry, activeCommand], () => void loadLaunchOptions());
 window.addEventListener("dbx:plugins-changed", () => void loadPluginData());
 
 async function loadPluginData() {
@@ -54,8 +57,106 @@ function definitionFor(pluginId: string): InstalledPlugin | undefined {
   return plugins.value.find((candidate) => candidate.manifest.id === pluginId);
 }
 
-// Generic "+": replays the command the active entry came from (no business semantics; multi-terminal/shell
-// the plugin's own panel page opens additional dock entries via the bridge openWorkbench).
+// Generic "+" picker (extension-point driven, zero business in the host):
+// - the command itself (replay),
+// - dynamic entries from the declared sidecar options_action (e.g. shell types),
+// - when connection_targets is on, the plugin's own saved connections.
+const connectionStore = useConnectionStore();
+const launchOptionEntries = ref<Array<{ key: string; label: string; description?: string; context?: Record<string, unknown> }>>([]);
+const launchOptionsLoading = ref(false);
+
+const activeAction = computed(() => (activeCommand.value?.action.type === "open-workbench" ? activeCommand.value.action : null));
+const activePluginProviders = computed(() => {
+  const pluginId = activeEntry.value?.pluginId;
+  const plugin = pluginId ? definitionFor(pluginId) : undefined;
+  return new Set((plugin?.manifest.contributions || []).filter((candidate) => candidate.type === "connection-provider").map((candidate) => candidate.id));
+});
+
+async function loadLaunchOptions() {
+  const action = activeAction.value;
+  const pluginId = activeEntry.value?.pluginId;
+  launchOptionEntries.value = [];
+  if (!action || !pluginId || !action.options_action) return;
+  launchOptionsLoading.value = true;
+  try {
+    const result = await api.invokePlugin<{ entries?: Array<{ label: string; description?: string; context?: Record<string, unknown> }> }>(pluginId, action.options_action, {});
+    launchOptionEntries.value = (result?.entries ?? []).map((entry, index) => ({ key: `opt:${index}`, label: entry.label, description: entry.description, context: entry.context }));
+  } catch (cause) {
+    console.warn("[DBX][plugin:dock] launch options unavailable", cause);
+    launchOptionEntries.value = [];
+  } finally {
+    launchOptionsLoading.value = false;
+  }
+}
+
+const connectionTargets = computed(() => {
+  if (!activeAction.value?.connection_targets) return [];
+  const providers = activePluginProviders.value;
+  return connectionStore.connections.filter((connection) => providers.has(connection.plugin_connection_provider ?? "")).map((connection) => ({ key: `conn:${connection.id}`, label: connection.name || connection.id, connection }));
+});
+
+const plusItems = computed(() => [
+  { value: "replay", label: t("pluginDock.newTerminal") },
+  ...launchOptionEntries.value.map((entry) => ({ value: `opt:${launchOptionEntries.value.indexOf(entry)}`, label: entry.label, description: entry.description })),
+  ...connectionTargets.value.map((target) => ({ value: target.key, label: `${t("pluginDock.connectionTerminal")} · ${target.label}` })),
+]);
+
+function onPlusAction(value: string) {
+  if (value === "replay") {
+    rerunActiveCommand();
+    return;
+  }
+  if (value.startsWith("opt:")) {
+    const index = Number(value.slice(4));
+    const option = launchOptionEntries.value[index];
+    if (!option) return;
+    const entry = activeEntry.value;
+    const command = activeCommand.value;
+    if (!entry || !command) return;
+    const id = addPluginDockEntry({
+      pluginId: entry.pluginId,
+      workbenchContributionId: entry.workbenchContributionId,
+      kind: "command",
+      commandId: command.id,
+      title: option.label,
+      icon: command.icon,
+      commandContext: option.context ?? {},
+    });
+    activatePluginDockEntry(id);
+    return;
+  }
+  if (value.startsWith("conn:")) {
+    const connectionId = value.slice("conn:".length);
+    const target = connectionTargets.value.find((candidate) => candidate.key === `conn:${connectionId}`);
+    const connection = target?.connection;
+    const entry = activeEntry.value;
+    const command = activeCommand.value;
+    if (!connection || !entry || !command) return;
+    const id = addPluginDockEntry({
+      pluginId: entry.pluginId,
+      workbenchContributionId: entry.workbenchContributionId,
+      kind: "connection",
+      commandId: command.id,
+      title: connection.name || connection.id,
+      icon: activeCommand.value?.icon,
+      commandContext: {
+        connectionId: connection.id,
+        providerId: connection.plugin_connection_provider,
+        connectionType: connection.plugin_connection_type,
+        connection: {
+          id: connection.id,
+          name: connection.name,
+          host: connection.host,
+          port: connection.port,
+          username: connection.username,
+          readOnly: connection.read_only === true,
+        },
+      },
+    });
+    activatePluginDockEntry(id);
+  }
+}
+
 function rerunActiveCommand() {
   const entry = activeEntry.value;
   const command = activeCommand.value;
@@ -130,9 +231,23 @@ function startResize(event: PointerEvent) {
         </button>
       </div>
       <span class="flex-1" />
-      <Button v-if="activeCommand" variant="ghost" size="icon" class="h-7 w-7" :title="t('pluginDock.newTerminal')" :aria-label="t('pluginDock.newTerminal')" @click="rerunActiveCommand">
-        <Plus class="h-4 w-4" />
-      </Button>
+      <LightDropdown
+        v-if="activeCommand"
+        model-value=""
+        :items="plusItems"
+        :aria-label="t('pluginDock.newTerminal')"
+        :trigger-title="t('pluginDock.newTerminal')"
+        trigger-class="inline-flex h-7 w-7 items-center justify-center rounded-md outline-none hover:bg-muted"
+        :show-trigger-label="false"
+        :show-chevron="false"
+        :highlight-selected="false"
+        align="end"
+        @update:model-value="onPlusAction"
+      >
+        <template #trigger-icon>
+          <Plus class="h-4 w-4" />
+        </template>
+      </LightDropdown>
       <Tooltip :delay-duration="200">
         <TooltipTrigger as-child>
           <Button variant="ghost" size="icon" class="h-7 w-7" :title="maximized ? t('pluginDock.restore') : t('pluginDock.maximize')" :aria-label="maximized ? t('pluginDock.restore') : t('pluginDock.maximize')" @click="setDockMaximized(!maximized)">

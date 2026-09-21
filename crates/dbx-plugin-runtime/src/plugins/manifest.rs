@@ -777,6 +777,18 @@ pub struct PluginOpenWorkbenchAction {
     /// Opaque plugin payload; served to the workbench under `context.plugin`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<serde_json::Value>,
+    /// Generic launch-options extension point: a sidecar method the host calls
+    /// (POST-less invoke, empty params) to fetch dynamic launch entries —
+    /// `{ "entries": [{ "label": string, "description"?: string, "context"?: object }] }`.
+    /// The host renders them as picker items and opens one panel per selection
+    /// with the returned context merged into the host-authored context; the
+    /// host never interprets the entries' business meaning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options_action: Option<String>,
+    /// When true, the host also offers the plugin's own saved connections
+    /// (read-only, secret-free list) as launch targets for this command.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub connection_targets: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1352,6 +1364,11 @@ fn validate_contributions(
                     PluginCommandAction::OpenWorkbench(action) => {
                         validate_optional_reference(Some(action.workbench.as_str()), "workbench", id, errors);
                         command_workbench_references.push((id.to_string(), action.workbench.clone()));
+                        if let Some(options_action) = &action.options_action {
+                            if !valid_sidecar_method(options_action) {
+                                errors.push(format!("Command '{id}' has an invalid options_action '{options_action}'"));
+                            }
+                        }
                         if let Some(context) = &action.context {
                             let context_bytes = serde_json::to_vec(context).map_or(PLUGIN_COMMAND_CONTEXT_MAX_BYTES + 1, |bytes| bytes.len());
                             if context_bytes > PLUGIN_COMMAND_CONTEXT_MAX_BYTES {
@@ -1424,6 +1441,21 @@ fn validate_contributions(
             errors.push(format!("Command '{command}' references missing workbench '{workbench}'"));
         }
     }
+}
+
+/// Sidecar method names look like `<domain>/<action>[/<sub>]` (lower-case
+/// words, digits, `-`, `_`, `.` separated by `/`), e.g. `local/shells/list`.
+fn valid_sidecar_method(value: &str) -> bool {
+    if value.is_empty() || value.len() > 128 || value.starts_with('/') || value.ends_with('/') || value.contains("//") {
+        return false;
+    }
+    value.split('/').all(|segment| {
+        !segment.is_empty()
+            && segment.chars().next().is_some_and(|first| first.is_ascii_lowercase() || first.is_ascii_digit())
+            && segment.chars().all(|character| {
+                character.is_ascii_lowercase() || character.is_ascii_digit() || matches!(character, '-' | '_' | '.')
+            })
+    })
 }
 
 /// enablement/when group validation: keys/operators must be in the v1 word lists, value shape must match the operator
@@ -1827,6 +1859,41 @@ mod tests {
             "type": "invoke-sidecar", "method": "x"
         }));
         assert!(rpc.is_err(), "RPC actions are outside the v1 contract");
+    }
+
+    #[test]
+    fn command_launch_extension_fields_parse_and_validate() {
+        let plugin_dir = std::env::temp_dir();
+        let workbench = serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "workbench", "id": "sample.main", "label": "Sample"
+        }))
+        .unwrap();
+        let command = serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "command", "id": "cmd", "label": "C",
+            "action": {
+                "type": "open-workbench", "workbench": "sample.main",
+                "presentation": "panel",
+                "options_action": "local/terminal/launch-options",
+                "connection_targets": true
+            }
+        }))
+        .unwrap();
+        let mut errors = Vec::new();
+        validate_contributions(&[workbench.clone()], false, true, &plugin_dir, &mut errors);
+        assert!(errors.is_empty(), "{errors:?}");
+        let mut errors = Vec::new();
+        validate_contributions(&[workbench, command], false, true, &plugin_dir, &mut errors);
+        assert!(errors.is_empty(), "{errors:?}");
+
+        // options_action 方法名非法拒收。
+        let bad = serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "command", "id": "cmd", "label": "C",
+            "action": { "type": "open-workbench", "workbench": "sample.main", "options_action": "local terminal" }
+        }))
+        .unwrap();
+        let mut errors = Vec::new();
+        validate_contributions(&[bad], false, true, &plugin_dir, &mut errors);
+        assert!(errors.iter().any(|e| e.contains("invalid options_action")), "{errors:?}");
     }
 
     #[test]

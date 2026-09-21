@@ -487,6 +487,15 @@ export interface PluginOpenWorkbenchAction {
   restore?: PluginCommandRestore;
   /** Opaque plugin payload; the host serves it under `context.plugin`. */
   context?: Record<string, unknown>;
+  /**
+   * Generic launch-options extension point: sidecar method returning
+   * `{ entries: [{ label, description?, context? }] }` for the dock "+" picker.
+   * The host renders labels and merges the chosen context into the
+   * host-authored panel context — never interpreting the business meaning.
+   */
+  options_action?: string;
+  /** When true, the host also offers the plugin's own saved connections as launch targets. */
+  connection_targets?: boolean;
 }
 
 export type PluginConditionOperator = "equals" | "notEquals" | "oneOf";
@@ -505,6 +514,12 @@ export interface PluginCommandEnablement {
 
 /** Context-key snapshot for condition evaluation (host-provided per scenario; clauses referencing a missing key are always false). */
 export type PluginConditionContextKeys = Record<string, string | boolean | undefined>;
+
+export interface PluginCommandLaunchOption {
+  label: string;
+  description?: string;
+  context?: Record<string, unknown>;
+}
 
 export interface PluginCommandContribution {
   type: "command";
