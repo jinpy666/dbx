@@ -102,4 +102,12 @@ describe("plugin command registry (PR-A4)", () => {
     expect(executePluginCommand(registry, { openPluginWorkbench } as never, "io.dbx.ssh", "open-local-terminal").error).toContain("missing workbench");
     expect(openPluginWorkbench).not.toHaveBeenCalled();
   });
+
+  it("finds the declared command targeting a workbench for entry routing", () => {
+    const registry = createFrontendPluginRegistry([installedPlugin("io.dbx.ssh", [{ type: "workbench", id: "io.dbx.ssh.workbench", label: "SSH" }, localTerminalCommand()] as unknown as InstalledPlugin["manifest"]["contributions"])]);
+    const command = registry.findCommandTargetingWorkbench("io.dbx.ssh", "io.dbx.ssh.workbench");
+    expect(command?.id).toBe("open-local-terminal");
+    expect(registry.findCommandTargetingWorkbench("io.dbx.ssh", "other.workbench")).toBeUndefined();
+    expect(registry.findCommandTargetingWorkbench("other.plugin", "io.dbx.ssh.workbench")).toBeUndefined();
+  });
 });

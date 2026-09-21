@@ -5,7 +5,7 @@
 // opens the plugin workbench with a host-authored context: the plugin payload
 // rides under `context.plugin`, while workbenchId/restored/surface are
 // injected here and can never be supplied by the plugin (§11 ownership).
-import { ref, shallowRef, watch } from "vue";
+import { onScopeDispose, ref, shallowRef, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import * as api from "@/lib/backend/api";
 import { uuid } from "@/lib/common/utils";
@@ -86,6 +86,15 @@ export function usePluginSidebarCommands() {
   }
 
   watch(locale, () => void refresh());
+  // 安装/卸载/替换插件（插件中心广播 dbx:plugins-changed）或窗口重新聚焦时
+  // 刷新入口，保证入口与已装插件清单一致。
+  const onPluginsChanged = () => void refresh();
+  window.addEventListener("dbx:plugins-changed", onPluginsChanged);
+  window.addEventListener("focus", onPluginsChanged);
+  onScopeDispose(() => {
+    window.removeEventListener("dbx:plugins-changed", onPluginsChanged);
+    window.removeEventListener("focus", onPluginsChanged);
+  });
   void refresh();
 
   return { entries, refresh, open };

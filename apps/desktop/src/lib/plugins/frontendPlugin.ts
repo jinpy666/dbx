@@ -80,6 +80,16 @@ export class FrontendPluginRegistry {
     return this.listCommands().find((entry) => entry.plugin.manifest.id === pluginId && entry.contribution.id === contributionId);
   }
 
+  /** First command of the plugin whose action opens the given workbench (§4.1). */
+  findCommandTargetingWorkbench(pluginId: string, workbenchContributionId: string): PluginCommandContribution | undefined {
+    for (const contribution of this.findPlugin(pluginId)?.contributions ?? []) {
+      if (contribution.type !== "command") continue;
+      const action = contribution.action;
+      if (action.type === "open-workbench" && action.workbench === workbenchContributionId) return contribution;
+    }
+    return undefined;
+  }
+
   /**
    * PR-A4 appSidebar placements (HOST_PLUGIN_UI_SPEC §5.1): one rendered row
    * per visible sidebar placement, ordered by `order` then the full command
