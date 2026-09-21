@@ -127,6 +127,7 @@ export class FrontendPluginRegistry {
         if (contribution.type !== "menus") continue;
         for (const item of contribution.items) {
           if (item.location !== "commandPalette") continue;
+          if (!evaluateWhen(item.when, "commandPalette")) continue;
           const command = definition.contributions.find((candidate): candidate is PluginCommandContribution => candidate.type === "command" && candidate.id === item.command);
           if (command) result.push({ plugin: definition.plugin, command, order: item.order });
         }

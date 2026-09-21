@@ -495,7 +495,7 @@ export type PluginConditionOperator = "equals" | "notEquals" | "oneOf";
 export interface PluginConditionClause {
   key: string;
   operator: PluginConditionOperator;
-  value: string | string[];
+  value: string | boolean | string[];
 }
 
 /** enablement/when 条件组：all 内隐式 AND；缺省（无字段）为 true。 */

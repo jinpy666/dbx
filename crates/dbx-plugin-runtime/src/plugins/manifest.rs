@@ -1450,12 +1450,13 @@ fn validate_command_enablement(
                 PLUGIN_CONDITION_KEYS.join(", ")
             ));
         }
-        let value_is_string = clause.value.as_str().is_some();
+        let value_is_scalar = clause.value.as_str().is_some() || clause.value.is_boolean();
         let value_is_string_array = clause.value.as_array().is_some_and(|values| !values.is_empty() && values.iter().all(|value| value.is_string()));
         match clause.operator {
             PluginConditionOperator::Equals | PluginConditionOperator::NotEquals => {
-                if !value_is_string {
-                    errors.push(format!("{label} condition '{}' requires a string value for equals/notEquals", clause.key));
+                // §5.3 示例含布尔值（readOnly notEquals true）——标量均可。
+                if !value_is_scalar {
+                    errors.push(format!("{label} condition '{}' requires a string or boolean value for equals/notEquals", clause.key));
                 }
             }
             PluginConditionOperator::OneOf => {
