@@ -529,9 +529,15 @@ export default withEnglishFallback({
     sourceCnb: "CNB",
   },
   pluginDock: {
-    close: "關閉面板",
+    close: "關閉終端",
+    hide: "隱藏面板",
     collapse: "收起面板",
     expand: "展開面板",
+    maximize: "最大化面板",
+    restore: "還原面板",
+    newTerminal: "新增終端",
+    newLocalTerminal: "本機終端",
+    connectionTerminal: "連線",
   },
   sidebar: {
     connections: "連線",

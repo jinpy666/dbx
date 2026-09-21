@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createFrontendPluginRegistry } from "./frontendPlugin";
 import { executePluginCommand } from "./pluginCommandRegistry";
-import { closePluginBottomDock, usePluginBottomDock } from "./pluginBottomDock";
+import { closePluginDockEntry, usePluginBottomDock } from "./pluginBottomDock";
 import type { InstalledPlugin, PluginMenusContribution } from "@/types/database";
 
 // PR-A4 command/menus 宿主侧（HOST_PLUGIN_UI_SPEC §4/§5/§8.3/§11）：命令注册
@@ -42,7 +42,9 @@ function menusContribution(items: PluginMenusContribution["items"]): PluginMenus
 
 describe("plugin command registry (PR-A4)", () => {
   beforeEach(() => {
-    closePluginBottomDock();
+    const { entries, visible } = usePluginBottomDock();
+    entries.value.splice(0);
+    visible.value = false;
   });
 
   it("derives visible appToolbar entries ordered by order then command id", () => {
@@ -81,10 +83,10 @@ describe("plugin command registry (PR-A4)", () => {
     expect(typeof options.context.workbenchId).toBe("string");
     expect(options.context.restored).toBe(false);
     expect(options.context.surface).toBe("tab");
-    expect(usePluginBottomDock().value).toBeNull();
+    expect(usePluginBottomDock().visible.value).toBe(false);
   });
 
-  it("opens the global bottom dock for panel presentations with a stable host workbenchId", () => {
+  it("adds a dock terminal entry per panel execution with host-authored identity", () => {
     const registry = createFrontendPluginRegistry([
       installedPlugin("io.dbx.ssh", [
         { type: "workbench", id: "io.dbx.ssh.workbench", label: "SSH" },
@@ -92,21 +94,34 @@ describe("plugin command registry (PR-A4)", () => {
       ] as unknown as InstalledPlugin["manifest"]["contributions"]),
     ]);
     const openPluginWorkbench = vi.fn();
+    const { entries, activeEntryId, visible } = usePluginBottomDock();
+
     const first = executePluginCommand(registry, { openPluginWorkbench } as never, "io.dbx.ssh", "open-local-terminal");
     expect(first.error).toBeUndefined();
-    const dock = usePluginBottomDock().value;
-    expect(dock).not.toBeNull();
-    expect(dock!.pluginId).toBe("io.dbx.ssh");
-    expect(dock!.workbenchContributionId).toBe("io.dbx.ssh.workbench");
-    expect(dock!.context.plugin).toEqual({ mode: "local-terminal" });
-    // 插件伪造的保留字段被宿主权威值覆盖；Dock 会话期内 workbenchId 稳定。
-    const firstWorkbenchId = dock!.context.workbenchId;
-    expect(firstWorkbenchId).not.toBe("plugin-forged");
-    expect(dock!.context.restored).toBe(false);
-    expect(dock!.context.surface).toBe("panel");
+    expect(entries.value).toHaveLength(1);
+    expect(visible.value).toBe(true);
+    const firstEntry = entries.value[0];
+    expect(firstEntry.pluginId).toBe("io.dbx.ssh");
+    expect(firstEntry.workbenchContributionId).toBe("io.dbx.ssh.workbench");
+    expect(firstEntry.context.plugin).toEqual({ mode: "local-terminal" });
+    // 插件伪造的保留字段被宿主权威值覆盖；workbenchId = 条目 id 且稳定。
+    expect(firstEntry.context.workbenchId).toBe(firstEntry.id);
+    expect(firstEntry.context.workbenchId).not.toBe("plugin-forged");
+    expect(firstEntry.context.restored).toBe(false);
+    expect(firstEntry.context.surface).toBe("panel");
+    expect(activeEntryId.value).toBe(firstEntry.id);
+
+    // 再执行一次 → 新终端条目（VS Code + 语义），互不覆盖。
     executePluginCommand(registry, { openPluginWorkbench } as never, "io.dbx.ssh", "open-local-terminal");
-    expect(usePluginBottomDock().value!.context.workbenchId).toBe(firstWorkbenchId);
+    expect(entries.value).toHaveLength(2);
+    expect(entries.value[1].id).not.toBe(firstEntry.id);
+    expect(activeEntryId.value).toBe(entries.value[1].id);
     expect(openPluginWorkbench).not.toHaveBeenCalled();
+
+    // 关闭条目回收 tab；全部关闭后面板隐藏。
+    closePluginDockEntry(entries.value[1].id);
+    closePluginDockEntry(entries.value[0].id);
+    expect(visible.value).toBe(false);
   });
 
   it("drops plugin-forged reserved fields and honors reuse:new with forceNew", () => {

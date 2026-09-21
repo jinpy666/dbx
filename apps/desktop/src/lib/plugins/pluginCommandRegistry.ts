@@ -9,7 +9,7 @@ import { onScopeDispose, ref, shallowRef, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import * as api from "@/lib/backend/api";
 import { uuid } from "@/lib/common/utils";
-import { openPluginBottomDock } from "@/lib/plugins/pluginBottomDock";
+import { addPluginDockEntry } from "@/lib/plugins/pluginBottomDock";
 import { createFrontendPluginRegistry, type FrontendPluginRegistry } from "@/lib/plugins/frontendPlugin";
 import { useQueryStore } from "@/stores/queryStore";
 import type { PluginCommandContribution } from "@/types/database";
@@ -35,13 +35,16 @@ export function executePluginCommand(registry: FrontendPluginRegistry, queryStor
   if (action.type !== "open-workbench") return { error: `Command '${pluginId}.${commandId}' has an unsupported action` };
   const workbench = registry.findWorkbench(pluginId, action.workbench);
   if (!workbench) return { error: `Command '${pluginId}.${commandId}' references missing workbench '${action.workbench}'` };
-  // presentation: panel → 全局底部 Dock（§8.3）；tab（缺省）→ 工作台 tab。
+  // presentation: panel → 全局底部 Dock（§8.3）新增一个终端条目；tab（缺省）
+  // → 工作台 tab。
   if (action.presentation === "panel") {
-    openPluginBottomDock({
+    addPluginDockEntry({
       pluginId,
       workbenchContributionId: action.workbench,
+      kind: "command",
       commandId: command.id,
       title: command.label,
+      icon: command.icon,
       commandContext: action.context ?? {},
     });
     return {};

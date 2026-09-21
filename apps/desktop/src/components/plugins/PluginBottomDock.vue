@@ -1,63 +1,169 @@
 <script setup lang="ts">
-// PR-A4/P2 全局底部 Dock（HOST_PLUGIN_UI_SPEC §8.3）：宿主通用容器，承载以
-// presentation: panel 打开的插件工作台。全局悬浮于所有页面之上；关闭仅移除
-// 面板，Dock 会话期内 workbenchId 稳定，重开经 local/session/list 接回同一
-// scope（tab 与 panel 实例可并存，复用键含 presentation）。
+// PR-A4/P2 全局底部面板 Dock（HOST_PLUGIN_UI_SPEC §8.3）——通用宿主容器：
+// 只负责面板框架（tab 条、拖拽高度、收起/最大化/隐藏）与承载任意插件的
+// panel webview，不含任何插件业务；多终端/shell 选择/连接切换等全部由插件
+// 在自己的 panel 页面里实现（通过桥 openWorkbench 再开一个面板条目）。
+// 每个条目持有宿主生成的稳定 workbenchId，切换用 v-show 保活（会话不停）。
 import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { ChevronDown, ChevronUp, X } from "@lucide/vue";
+import { ChevronDown, ChevronUp, Maximize2, Minimize2, Plus, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import PluginIcon from "@/components/plugins/PluginIcon.vue";
 import PluginWorkbenchHost from "@/components/plugins/PluginWorkbenchHost.vue";
-import { closePluginBottomDock, usePluginBottomDock } from "@/lib/plugins/pluginBottomDock";
+import { activatePluginDockEntry, addPluginDockEntry, closePluginDockEntry, setDockMaximized, usePluginBottomDock } from "@/lib/plugins/pluginBottomDock";
+import { executePluginCommand } from "@/lib/plugins/pluginCommandRegistry";
+import { createFrontendPluginRegistry } from "@/lib/plugins/frontendPlugin";
+import { useQueryStore } from "@/stores/queryStore";
 import * as api from "@/lib/backend/api";
 import type { InstalledPlugin, PluginWorkbenchContribution } from "@/types/database";
 
 const DOCK_HEIGHT_PX = 320;
+const DOCK_MIN_HEIGHT_PX = 140;
 
 const { t } = useI18n();
-const dock = usePluginBottomDock();
+const queryStore = useQueryStore();
+const { entries, activeEntryId, visible, maximized } = usePluginBottomDock();
 const collapsed = ref(false);
+const dockHeight = ref(DOCK_HEIGHT_PX);
 const plugins = ref<InstalledPlugin[]>([]);
 
-watch(
-  dock,
-  async (state) => {
-    if (!state) return;
-    try {
-      plugins.value = await api.listPlugins();
-    } catch {
-      plugins.value = [];
-    }
-  },
-  { immediate: true },
-);
-
-const definition = computed(() => (dock.value ? (plugins.value.find((plugin) => plugin.manifest.id === dock.value!.pluginId) ?? null) : null));
-const workbench = computed(() => {
-  const state = dock.value;
-  if (!state || !definition.value) return null;
-  return (definition.value.manifest.contributions || []).find((candidate): candidate is PluginWorkbenchContribution => candidate.type === "workbench" && candidate.id === state.workbenchContributionId) ?? null;
+const activeEntry = computed(() => entries.value.find((entry) => entry.id === activeEntryId.value) ?? null);
+const activeCommand = computed(() => {
+  const entry = activeEntry.value;
+  if (!entry || entry.kind !== "command" || !entry.commandId) return null;
+  return createFrontendPluginRegistry(plugins.value).findCommand(entry.pluginId, entry.commandId)?.contribution ?? null;
 });
+
+watch(entries, () => void loadPluginData(), { deep: true, immediate: true });
+window.addEventListener("dbx:plugins-changed", () => void loadPluginData());
+
+async function loadPluginData() {
+  if (!entries.value.length) {
+    plugins.value = [];
+    return;
+  }
+  try {
+    plugins.value = await api.listPlugins();
+  } catch {
+    plugins.value = [];
+  }
+}
+
+function definitionFor(pluginId: string): InstalledPlugin | undefined {
+  return plugins.value.find((candidate) => candidate.manifest.id === pluginId);
+}
+
+// 通用「+」：重放当前面板条目来源的命令（无业务语义；多终端/shell 选择等
+// 由插件在自己 panel 页面里通过桥 openWorkbench 再开面板条目）。
+function rerunActiveCommand() {
+  const entry = activeEntry.value;
+  const command = activeCommand.value;
+  if (!entry || !command) return;
+  const result = executePluginCommand(createFrontendPluginRegistry(plugins.value), queryStore, entry.pluginId, command.id);
+  if (result.error) console.warn("[DBX][plugin:dock]", result.error);
+}
+
+// 面板 webview 内的插件经桥 openWorkbench 请求再开面板：宿主重建权威
+// context（丢弃插件传入的保留字段），新增一个通用面板条目。
+function onPanelOpenWorkbench(entry: (typeof entries.value)[number], _contributionId: string, childContext?: Record<string, unknown>) {
+  const payload = childContext && typeof childContext === "object" && !Array.isArray(childContext) ? { ...childContext } : {};
+  delete payload.workbenchId;
+  delete payload.restored;
+  delete payload.surface;
+  const id = addPluginDockEntry({
+    pluginId: entry.pluginId,
+    workbenchContributionId: entry.workbenchContributionId,
+    kind: "command",
+    title: entry.title,
+    commandContext: payload,
+  });
+  activatePluginDockEntry(id);
+}
+
+// 顶边拖拽调整高度（min 140px，至多窗口 80%）。
+const resizing = ref(false);
+function startResize(event: PointerEvent) {
+  event.preventDefault();
+  resizing.value = true;
+  const startY = event.clientY;
+  const startHeight = dockHeight.value;
+  const onMove = (moveEvent: PointerEvent) => {
+    const next = startHeight - (moveEvent.clientY - startY);
+    dockHeight.value = Math.min(Math.max(next, DOCK_MIN_HEIGHT_PX), Math.floor(window.innerHeight * 0.8));
+  };
+  const onUp = () => {
+    resizing.value = false;
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+  };
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onUp);
+}
 </script>
 
 <template>
-  <div v-if="dock" data-plugin-bottom-dock class="fixed inset-x-0 bottom-0 z-40 flex flex-col border-t bg-background shadow-[0_-10px_30px_rgba(0,0,0,0.28)]" :style="{ height: (collapsed ? 36 : DOCK_HEIGHT_PX) + 'px' }">
-    <div class="flex h-9 shrink-0 items-center gap-2 border-b bg-muted/30 px-3">
-      <PluginIcon v-if="definition" :plugin-id="dock.pluginId" :icon="definition.manifest.icon" class="h-4 w-4 shrink-0" />
-      <span class="min-w-0 truncate text-xs font-medium" data-plugin-dock-title>{{ dock.title }}</span>
-      <span class="min-w-0 truncate text-[11px] text-muted-foreground">{{ t("sidebar.pluginEntrySource", { name: definition?.manifest.name ?? dock.pluginId }) }}</span>
+  <div v-if="visible" data-plugin-bottom-dock class="relative z-10 flex shrink-0 flex-col overflow-hidden border-t bg-background" :style="{ height: maximized ? '70vh' : collapsed ? '2.25rem' : `${dockHeight}px` }">
+    <div data-plugin-dock-resize-handle class="absolute inset-x-0 top-0 z-10 h-1.5 cursor-row-resize hover:bg-primary/30" @pointerdown="startResize" />
+    <div class="flex h-9 shrink-0 items-center gap-1 border-b bg-muted/30 pl-2 pr-3">
+      <div class="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto" data-plugin-dock-tabs>
+        <button
+          v-for="entry in entries"
+          :key="entry.id"
+          class="group flex h-7 shrink-0 items-center gap-1.5 rounded-md px-2 text-xs"
+          :class="entry.id === activeEntryId ? 'bg-accent font-medium text-foreground' : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
+          :title="entry.title"
+          @click="activatePluginDockEntry(entry.id)"
+        >
+          <PluginIcon :plugin-id="entry.pluginId" :icon="entry.icon" class="h-3.5 w-3.5 shrink-0" />
+          <span class="max-w-40 truncate">{{ entry.title }}</span>
+          <span class="ml-0.5 rounded p-0.5 opacity-0 transition-opacity hover:bg-background/80 group-hover:opacity-100" role="button" :aria-label="t('pluginDock.close')" @click.stop="closePluginDockEntry(entry.id)">
+            <X class="h-3 w-3" />
+          </span>
+        </button>
+      </div>
       <span class="flex-1" />
-      <Button variant="ghost" size="icon" class="h-6 w-6" :title="collapsed ? t('pluginDock.expand') : t('pluginDock.collapse')" :aria-label="collapsed ? t('pluginDock.expand') : t('pluginDock.collapse')" @click="collapsed = !collapsed">
+      <Button v-if="activeCommand" variant="ghost" size="icon" class="h-7 w-7" :title="t('pluginDock.newTerminal')" :aria-label="t('pluginDock.newTerminal')" @click="rerunActiveCommand">
+        <Plus class="h-4 w-4" />
+      </Button>
+      <Tooltip :delay-duration="200">
+        <TooltipTrigger as-child>
+          <Button variant="ghost" size="icon" class="h-7 w-7" :title="maximized ? t('pluginDock.restore') : t('pluginDock.maximize')" :aria-label="maximized ? t('pluginDock.restore') : t('pluginDock.maximize')" @click="setDockMaximized(!maximized)">
+            <Minimize2 v-if="maximized" class="h-3.5 w-3.5" />
+            <Maximize2 v-else class="h-3.5 w-3.5" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{{ maximized ? t("pluginDock.restore") : t("pluginDock.maximize") }}</TooltipContent>
+      </Tooltip>
+      <Button variant="ghost" size="icon" class="h-7 w-7" :title="collapsed ? t('pluginDock.expand') : t('pluginDock.collapse')" :aria-label="collapsed ? t('pluginDock.expand') : t('pluginDock.collapse')" @click="collapsed = !collapsed">
         <ChevronUp v-if="collapsed" class="h-3.5 w-3.5" />
         <ChevronDown v-else class="h-3.5 w-3.5" />
       </Button>
-      <Button variant="ghost" size="icon" class="h-6 w-6" :title="t('pluginDock.close')" :aria-label="t('pluginDock.close')" @click="closePluginBottomDock">
+      <Button
+        variant="ghost"
+        size="icon"
+        class="h-7 w-7"
+        :title="t('pluginDock.hide')"
+        :aria-label="t('pluginDock.hide')"
+        @click="
+          collapsed = false;
+          setDockMaximized(false);
+        "
+      >
         <X class="h-3.5 w-3.5" />
       </Button>
     </div>
-    <div v-show="!collapsed" class="min-h-0 flex-1 overflow-hidden">
-      <PluginWorkbenchHost v-if="definition && workbench" :plugin="definition" :contribution="workbench" :context="dock.context" @close-tab="closePluginBottomDock" />
+    <div class="min-h-0 flex-1 overflow-hidden">
+      <div v-for="entry in entries" v-show="entry.id === activeEntryId && !collapsed" :key="entry.id" class="h-full w-full">
+        <PluginWorkbenchHost
+          v-if="definitionFor(entry.pluginId)"
+          :plugin="definitionFor(entry.pluginId)!"
+          :contribution="(definitionFor(entry.pluginId)!.manifest.contributions || []).find((candidate): candidate is PluginWorkbenchContribution => candidate.type === 'workbench' && candidate.id === entry.workbenchContributionId)!"
+          :context="entry.context"
+          @close-tab="closePluginDockEntry(entry.id)"
+          @open-workbench="(_pluginId, contributionId, context) => onPanelOpenWorkbench(entry, contributionId, context)"
+        />
+      </div>
     </div>
   </div>
 </template>

@@ -451,9 +451,15 @@ export default withEnglishFallback({
     toUpdate: "更新",
   },
   pluginDock: {
-    close: "关闭面板",
+    close: "关闭终端",
+    hide: "隐藏面板",
     collapse: "收起面板",
     expand: "展开面板",
+    maximize: "最大化面板",
+    restore: "还原面板",
+    newTerminal: "新建终端",
+    newLocalTerminal: "本地终端",
+    connectionTerminal: "连接",
   },
   sidebar: {
     connections: "连接",

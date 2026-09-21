@@ -535,9 +535,15 @@ export default {
     toUpdate: "to update",
   },
   pluginDock: {
-    close: "Close panel",
+    close: "Close terminal",
+    hide: "Hide panel",
     collapse: "Collapse panel",
     expand: "Expand panel",
+    maximize: "Maximize panel",
+    restore: "Restore panel",
+    newTerminal: "New terminal",
+    newLocalTerminal: "Local terminal",
+    connectionTerminal: "Connection",
   },
   sidebar: {
     connections: "CONNECTIONS",
