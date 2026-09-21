@@ -5,6 +5,8 @@ import { Command, FileCode, FileText, Search, FolderPlus, SlidersHorizontal, X }
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { useQuickOpen, type QuickOpenItem } from "@/composables/useQuickOpen";
+import { usePluginCommandPalette } from "@/lib/plugins/pluginCommandPalette";
+import { useToast } from "@/composables/useToast";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { formatShortcutDisplay } from "@/lib/editor/shortcutDisplay";
 import { getGlobalSearchRoots, saveGlobalSearchRoots, getGlobalSearchExtensions, saveGlobalSearchExtensions } from "@/lib/globalSearch/globalSearchSettings";
@@ -21,7 +23,11 @@ const emit = defineEmits<{
 }>();
 
 const { t } = useI18n();
-const { searchQuery, filteredItems, selectedIndex, selectedItem, selectNext, selectPrevious, setQuery, loadExternalSqlFiles, contentMode, contentGroups, contentSelectedItem, contentSearching, setContentMode } = useQuickOpen();
+// 插件 commandPalette 命令（HOST_PLUGIN_UI_SPEC §5）：作为 quick-open 补充条目
+// 接入；清单刷新由 dbx:plugins-changed / focus / 语言变化驱动，打开对话框时兜底再刷一次。
+const pluginPalette = usePluginCommandPalette();
+const { toast } = useToast();
+const { searchQuery, filteredItems, selectedIndex, selectedItem, selectNext, selectPrevious, setQuery, loadExternalSqlFiles, contentMode, contentGroups, contentSelectedItem, contentSearching, setContentMode } = useQuickOpen({ extraItems: pluginPalette.items });
 const inputRef = ref<HTMLInputElement | null>(null);
 const listRef = ref<HTMLElement | null>(null);
 const settingsStore = useSettingsStore();
@@ -128,6 +134,14 @@ function handleKeyDown(e: KeyboardEvent): void {
 }
 
 function handleSelect(item: QuickOpenItem): void {
+  // 插件命令在本组件内闭环执行：不向 App.vue 的对象导航分发（那条链路按
+  // connectionId 走连接/展开逻辑，对命令条目无意义），执行错误用现有 toast 提示。
+  if (item.type === "plugin_command") {
+    const result = pluginPalette.open(item);
+    if (result.error) toast(result.error, 5000);
+    dialogOpen.value = false;
+    return;
+  }
   emit("select", item);
   dialogOpen.value = false;
 }
@@ -209,6 +223,12 @@ function getItemIcon(type: string) {
   return null;
 }
 
+/** 右侧徽标文案：插件命令显示来源插件名作为出处提示，其余沿用类型标签。 */
+function getTypeBadge(item: QuickOpenItem): string {
+  if (item.type === "plugin_command") return item.pluginName || item.pluginId || "";
+  return getTypeLabel(item.type);
+}
+
 watch(
   () => props.open,
   (newOpen) => {
@@ -217,6 +237,8 @@ watch(
       setContentMode(props.initialContentMode === true);
       searchSettingsOpen.value = false;
       refreshSearchSettings();
+      // 打开时兜底刷新插件命令清单（常规刷新由 dbx:plugins-changed 等事件驱动）。
+      void pluginPalette.refresh();
       // Eagerly load external SQL files so they appear in the initial list
       void loadExternalSqlFiles();
       nextTick(() => {
@@ -378,7 +400,7 @@ watch(selectedIndex, async () => {
                   </div>
                 </div>
                 <div class="text-xs px-2 py-1 rounded bg-muted text-muted-foreground whitespace-nowrap">
-                  {{ getTypeLabel(item.type) }}
+                  {{ getTypeBadge(item) }}
                 </div>
               </div>
             </div>

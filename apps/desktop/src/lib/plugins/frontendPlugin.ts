@@ -112,6 +112,27 @@ export class FrontendPluginRegistry {
     return result;
   }
 
+  /**
+   * commandPalette 放置位（HOST_PLUGIN_UI_SPEC §5）：palette 声明不设
+   * default_visible 门槛（§5.2 只约束工具栏项缺省隐藏），全部命令先按 `order`
+   * 升序、再按全限定命令 id（`${pluginId}.${commandId}`）稳定排序，结果与
+   * 清单或安装顺序无关。
+   */
+  listPaletteMenuCommands(): Array<{ plugin: InstalledPlugin; command: PluginCommandContribution; order: number }> {
+    const result: Array<{ plugin: InstalledPlugin; command: PluginCommandContribution; order: number }> = [];
+    for (const definition of this.definitions) {
+      for (const contribution of definition.contributions) {
+        if (contribution.type !== "menus") continue;
+        for (const item of contribution.items) {
+          if (item.location !== "commandPalette") continue;
+          const command = definition.contributions.find((candidate): candidate is PluginCommandContribution => candidate.type === "command" && candidate.id === item.command);
+          if (command) result.push({ plugin: definition.plugin, command, order: item.order });
+        }
+      }
+    }
+    return result.sort((left, right) => left.order - right.order || `${left.plugin.manifest.id}.${left.command.id}`.localeCompare(`${right.plugin.manifest.id}.${right.command.id}`));
+  }
+
   private listContributions<T extends PluginContribution["type"]>(type: T): Array<PluginContributionEntry<Extract<PluginContribution, { type: T }>>> {
     return this.definitions
       .filter((definition) => definition.plugin.compatibility.compatible)
