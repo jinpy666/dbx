@@ -694,6 +694,10 @@ pub const PLUGIN_COMMAND_CONTEXT_MAX_BYTES: usize = 64 * 1024;
 pub enum PluginCommandPresentation {
     #[default]
     Tab,
+    /// Opens the command in the host's global bottom dock (BottomDock,
+    /// HOST_PLUGIN_UI_SPEC §8.3). Tab and panel instances can coexist: the
+    /// reuse key includes the presentation.
+    Panel,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -1658,6 +1662,7 @@ mod tests {
         validate_contributions, PluginCommandAction, PluginCommandContribution, PluginCommandPresentation,
         PluginCommandReuse, PluginCommandRestore, PluginContribution, PluginConnectionActionContribution,
         PluginConnectionProviderContribution, PluginFormFieldBinding, PluginManifest, PluginMenuItem,
+        PluginOpenWorkbenchAction,
         PluginMenuLocation, PluginMenusContribution,
     };
 
@@ -1717,14 +1722,18 @@ mod tests {
             "location": "statusBar", "command": "x", "group": "primary", "order": 1
         }))
         .is_err());
-        let mut broken = serde_json::from_value::<PluginCommandAction>(serde_json::json!({
+        let panel: PluginCommandAction = serde_json::from_value(serde_json::json!({
             "type": "open-workbench", "workbench": "wb", "presentation": "panel"
-        }));
-        assert!(broken.is_err(), "presentation 枚举外的值必须拒收（panel 属后续里程碑）");
-        broken = serde_json::from_value::<PluginCommandAction>(serde_json::json!({
+        }))
+        .unwrap();
+        assert!(matches!(
+            panel,
+            PluginCommandAction::OpenWorkbench(PluginOpenWorkbenchAction { presentation: PluginCommandPresentation::Panel, .. })
+        ));
+        let rpc: Result<PluginCommandAction, _> = serde_json::from_value(serde_json::json!({
             "type": "invoke-sidecar", "method": "x"
         }));
-        assert!(broken.is_err(), "RPC 动作不属于 v1 契约");
+        assert!(rpc.is_err(), "RPC 动作不属于 v1 契约");
     }
 
     #[test]

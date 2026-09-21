@@ -1,12 +1,13 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createFrontendPluginRegistry } from "./frontendPlugin";
 import { executePluginCommand } from "./pluginCommandRegistry";
+import { closePluginBottomDock, usePluginBottomDock } from "./pluginBottomDock";
 import type { InstalledPlugin, PluginMenusContribution } from "@/types/database";
 
-// PR-A4 command/menus 宿主侧（HOST_PLUGIN_UI_SPEC §4/§5/§11）：命令注册表
-// 从已安装插件的静态声明派生 appSidebar 入口，执行时以宿主权威 context 打开
-// 工作台——插件载荷在 context.plugin，workbenchId/restored/surface 由宿主
-// 注入，singleton 复用实例、new 另起实例。
+// PR-A4 command/menus 宿主侧（HOST_PLUGIN_UI_SPEC §4/§5/§8.3/§11）：命令注册
+// 表从已安装插件的静态声明派生工具栏入口；执行时以宿主权威 context 打开——
+// presentation: tab（缺省）开工作台 tab，panel 开全局底部 Dock；插件载荷在
+// context.plugin，workbenchId/restored/surface 由宿主注入、永不采信插件值。
 function installedPlugin(id: string, contributions: InstalledPlugin["manifest"]["contributions"] = []): InstalledPlugin {
   return {
     compatibility: { compatible: true },
@@ -40,28 +41,32 @@ function menusContribution(items: PluginMenusContribution["items"]): PluginMenus
 }
 
 describe("plugin command registry (PR-A4)", () => {
-  it("derives visible appSidebar entries ordered by order then command id", () => {
+  beforeEach(() => {
+    closePluginBottomDock();
+  });
+
+  it("derives visible appToolbar entries ordered by order then command id", () => {
     const registry = createFrontendPluginRegistry([
       installedPlugin("io.dbx.ssh", [
         { type: "workbench", id: "io.dbx.ssh.workbench", label: "SSH" },
         localTerminalCommand(),
         menusContribution([
-          { location: "appToolbar", command: "open-local-terminal", group: "navigation", order: 100, default_visible: false },
-          { location: "appSidebar", command: "open-local-terminal", group: "primary", order: 100, default_visible: true },
+          { location: "commandPalette", command: "open-local-terminal", group: "primary", order: 100 },
+          { location: "appToolbar", command: "open-local-terminal", group: "navigation", order: 100, default_visible: true },
         ]),
       ] as unknown as InstalledPlugin["manifest"]["contributions"]),
     ]);
-    const entries = registry.listSidebarMenuCommands();
+    const entries = registry.listToolbarMenuCommands();
     expect(entries).toHaveLength(1);
     expect(entries[0].plugin.manifest.id).toBe("io.dbx.ssh");
     expect(entries[0].command.id).toBe("open-local-terminal");
 
-    // appToolbar 默认隐藏；default_visible:false 的 appSidebar 也不出现。
+    // §5.2：工具栏项缺省隐藏——default_visible 非 true 一律不渲染。
     const hidden = createFrontendPluginRegistry([installedPlugin("io.dbx.ssh", [localTerminalCommand(), menusContribution([{ location: "appToolbar", command: "open-local-terminal", group: "navigation", order: 100 }])] as unknown as InstalledPlugin["manifest"]["contributions"])]);
-    expect(hidden.listSidebarMenuCommands()).toHaveLength(0);
+    expect(hidden.listToolbarMenuCommands()).toHaveLength(0);
   });
 
-  it("executes a command with a host-authored context and singleton reuse", () => {
+  it("executes a tab command with a host-authored context and singleton reuse", () => {
     const registry = createFrontendPluginRegistry([installedPlugin("io.dbx.ssh", [{ type: "workbench", id: "io.dbx.ssh.workbench", label: "SSH" }, localTerminalCommand()] as unknown as InstalledPlugin["manifest"]["contributions"])]);
     const openPluginWorkbench = vi.fn();
     const result = executePluginCommand(registry, { openPluginWorkbench } as never, "io.dbx.ssh", "open-local-terminal");
@@ -76,6 +81,32 @@ describe("plugin command registry (PR-A4)", () => {
     expect(typeof options.context.workbenchId).toBe("string");
     expect(options.context.restored).toBe(false);
     expect(options.context.surface).toBe("tab");
+    expect(usePluginBottomDock().value).toBeNull();
+  });
+
+  it("opens the global bottom dock for panel presentations with a stable host workbenchId", () => {
+    const registry = createFrontendPluginRegistry([
+      installedPlugin("io.dbx.ssh", [
+        { type: "workbench", id: "io.dbx.ssh.workbench", label: "SSH" },
+        localTerminalCommand({ presentation: "panel", context: { plugin: { mode: "local-terminal" }, workbenchId: "plugin-forged", surface: "tab" } }),
+      ] as unknown as InstalledPlugin["manifest"]["contributions"]),
+    ]);
+    const openPluginWorkbench = vi.fn();
+    const first = executePluginCommand(registry, { openPluginWorkbench } as never, "io.dbx.ssh", "open-local-terminal");
+    expect(first.error).toBeUndefined();
+    const dock = usePluginBottomDock().value;
+    expect(dock).not.toBeNull();
+    expect(dock!.pluginId).toBe("io.dbx.ssh");
+    expect(dock!.workbenchContributionId).toBe("io.dbx.ssh.workbench");
+    expect(dock!.context.plugin).toEqual({ mode: "local-terminal" });
+    // 插件伪造的保留字段被宿主权威值覆盖；Dock 会话期内 workbenchId 稳定。
+    const firstWorkbenchId = dock!.context.workbenchId;
+    expect(firstWorkbenchId).not.toBe("plugin-forged");
+    expect(dock!.context.restored).toBe(false);
+    expect(dock!.context.surface).toBe("panel");
+    executePluginCommand(registry, { openPluginWorkbench } as never, "io.dbx.ssh", "open-local-terminal");
+    expect(usePluginBottomDock().value!.context.workbenchId).toBe(firstWorkbenchId);
+    expect(openPluginWorkbench).not.toHaveBeenCalled();
   });
 
   it("drops plugin-forged reserved fields and honors reuse:new with forceNew", () => {

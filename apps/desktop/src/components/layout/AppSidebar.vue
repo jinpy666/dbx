@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
 import { Upload, Download, ArrowDownUp, FolderPlus, FolderOpen, RefreshCw, ChevronsLeft, ChevronsDownUp, Trash2, FolderInput, Check, Minus, Square, X } from "@lucide/vue";
@@ -9,10 +9,8 @@ import { Input } from "@/components/ui/input";
 import LightDropdown from "@/components/ui/LightDropdown.vue";
 import LightTooltip from "@/components/ui/LightTooltip.vue";
 import ConnectionTree from "@/components/sidebar/ConnectionTree.vue";
-import PluginIcon from "@/components/plugins/PluginIcon.vue";
 import { applyConnectionMultiSelection, emptyConnectionMultiSelection, isExitConnectionMultiSelectionShortcut } from "@/lib/sidebar/sidebarConnectionMultiSelect";
 import { connectionGroupDestinationRows } from "@/lib/sidebar/sidebarLayout";
-import { usePluginSidebarCommands, type PluginSidebarCommandEntry } from "@/lib/plugins/pluginCommandRegistry";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useToast } from "@/composables/useToast";
 import type { QueryTab, TreeNode } from "@/types/database";
@@ -33,7 +31,7 @@ const emit = defineEmits<{
 
 type ImportSource = "dbx" | "navicat" | "dbeaver" | "datagrip";
 
-const { t, locale } = useI18n();
+const { t } = useI18n();
 const connectionStore = useConnectionStore();
 const { toast } = useToast();
 const connectionTreeRef = ref<InstanceType<typeof ConnectionTree>>();
@@ -90,18 +88,6 @@ async function refreshTree() {
   } catch (e: any) {
     toast(t("connection.connectFailed", { message: translateBackendError(t, e) }), 5000);
   }
-}
-
-// PR-A4 侧栏插件入口区（HOST_PLUGIN_UI_SPEC §5.1 appSidebar）：仅渲染声明
-// 了 appSidebar placement 的插件命令，缺一不可见的 chrome 不出现；执行走
-// 命令注册表（宿主权威 context，singleton 复用既有实例 tab）。
-const { entries: pluginCommandEntries, refresh: refreshPluginCommands, open: openPluginCommandEntry } = usePluginSidebarCommands();
-onMounted(() => void refreshPluginCommands());
-watch(locale, () => void refreshPluginCommands());
-
-function onPluginCommandClicked(entry: PluginSidebarCommandEntry) {
-  const result = openPluginCommandEntry(entry);
-  if (result.error) toast(result.error, 5000);
 }
 
 function createNewGroup() {
@@ -305,19 +291,6 @@ defineExpose({ focusSearch, locateTabInSidebar });
             </LightTooltip>
           </span>
         </template>
-      </div>
-      <div v-if="pluginCommandEntries.length" data-plugin-sidebar-entries class="border-b bg-muted/10 px-2 py-2">
-        <p class="px-1 pb-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">{{ t("sidebar.pluginEntries") }}</p>
-        <button
-          v-for="entry in pluginCommandEntries"
-          :key="`${entry.pluginId}.${entry.commandId}`"
-          class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-foreground hover:bg-muted"
-          :title="t('sidebar.pluginEntrySource', { name: entry.pluginName })"
-          @click="onPluginCommandClicked(entry)"
-        >
-          <PluginIcon :plugin-id="entry.pluginId" :icon="entry.icon" class="h-4 w-4 shrink-0" />
-          <span class="min-w-0 flex-1 truncate text-left">{{ entry.label }}</span>
-        </button>
       </div>
       <div class="flex-1 min-h-0">
         <ConnectionTree ref="connectionTreeRef" @open-settings="(initialTab) => emit('open-settings', initialTab)" @add-to-ai="(nodes) => emit('add-to-ai', nodes)" />

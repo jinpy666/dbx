@@ -91,17 +91,18 @@ export class FrontendPluginRegistry {
   }
 
   /**
-   * PR-A4 appSidebar placements (HOST_PLUGIN_UI_SPEC §5.1): one rendered row
-   * per visible sidebar placement, ordered by `order` then the full command
-   * id so the result never depends on manifest or install order. Toolbar and
-   * command-palette surfaces read the same menus data through listMenus().
+   * PR-A4 appToolbar placements (HOST_PLUGIN_UI_SPEC §5.1): one icon entry
+   * per visible toolbar placement, ordered by `order` then the full command
+   * id so the result never depends on manifest or install order. Toolbar
+   * entries stay hidden unless the manifest sets `default_visible: true`
+   * (§5.2: toolbar items default to hidden).
    */
-  listSidebarMenuCommands(): Array<{ plugin: InstalledPlugin; command: PluginCommandContribution; order: number }> {
+  listToolbarMenuCommands(): Array<{ plugin: InstalledPlugin; command: PluginCommandContribution; order: number }> {
     const result: Array<{ plugin: InstalledPlugin; command: PluginCommandContribution; order: number }> = [];
     for (const definition of this.definitions) {
       for (const contribution of definition.contributions) {
         if (contribution.type !== "menus") continue;
-        const placements = contribution.items.filter((item) => item.location === "appSidebar" && item.default_visible !== false).sort((a, b) => a.order - b.order || a.command.localeCompare(b.command));
+        const placements = contribution.items.filter((item) => item.location === "appToolbar" && item.default_visible === true).sort((a, b) => a.order - b.order || a.command.localeCompare(b.command));
         for (const item of placements) {
           const command = definition.contributions.find((candidate): candidate is PluginCommandContribution => candidate.type === "command" && candidate.id === item.command);
           if (command) result.push({ plugin: definition.plugin, command, order: item.order });

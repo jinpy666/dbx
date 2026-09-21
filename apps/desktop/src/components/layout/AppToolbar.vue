@@ -11,6 +11,9 @@ import ExportProgressPopover from "@/components/export/ExportProgressPopover.vue
 import ToolbarUpdateIcon from "@/components/layout/ToolbarUpdateIcon.vue";
 import { MAC_TRAFFIC_LIGHT_X, macTrafficLightInsetPaddingForScale, shouldReserveMacTrafficLightInset, useWindowControls } from "@/composables/useWindowControls";
 import { useToast } from "@/composables/useToast";
+import PluginIcon from "@/components/plugins/PluginIcon.vue";
+import { closePluginBottomDock, usePluginBottomDock } from "@/lib/plugins/pluginBottomDock";
+import { usePluginToolbarCommands, type PluginToolbarCommandEntry } from "@/lib/plugins/pluginCommandRegistry";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { isSystemAppThemeMode, type AppThemeMode } from "@/lib/app/appTheme";
 
@@ -75,6 +78,23 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 const { toast } = useToast();
+
+// PR-A4 appToolbar surface（HOST_PLUGIN_UI_SPEC §5.1）：插件命令以图标形式
+// 与设置/AI 同区展示；点击执行命令（presentation: panel → 全局底部 Dock），
+// 对已打开的 Dock 命令再点一次即收起。
+const { entries: pluginCommandEntries, open: openPluginCommand } = usePluginToolbarCommands();
+const dockState = usePluginBottomDock();
+function isPluginDockOpen(entry: PluginToolbarCommandEntry): boolean {
+  return !!dockState.value && dockState.value.pluginId === entry.pluginId && dockState.value.commandId === entry.commandId;
+}
+function togglePluginCommand(entry: PluginToolbarCommandEntry) {
+  if (isPluginDockOpen(entry)) {
+    closePluginBottomDock();
+    return;
+  }
+  const result = openPluginCommand(entry);
+  if (result.error) toast(result.error, 5000);
+}
 const settingsStore = useSettingsStore();
 const toolbarItems = computed(() => settingsStore.editorSettings.toolbarItems);
 const { isMac, isDesktop, showControls, isMaximized, isFullscreen, minimize, toggleMaximize, close } = useWindowControls();
@@ -745,6 +765,16 @@ const toolbarStyle = computed(() => {
           </Button>
         </TooltipTrigger>
         <TooltipContent>GitHub</TooltipContent>
+      </Tooltip>
+
+      <Tooltip v-for="entry in pluginCommandEntries" :key="`${entry.pluginId}.${entry.commandId}`">
+        <TooltipTrigger as-child>
+          <Button variant="ghost" size="icon" class="toolbar-action-button relative h-8 w-8 shrink-0" :class="{ 'toolbar-action-button--active bg-accent': isPluginDockOpen(entry) }" :aria-label="entry.label" @click="togglePluginCommand(entry)">
+            <PluginIcon :plugin-id="entry.pluginId" :icon="entry.icon" class="toolbar-action-icon h-4 w-4" />
+            <span v-if="isPluginDockOpen(entry)" class="toolbar-panel-status" aria-hidden="true" />
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent>{{ entry.label }} · {{ entry.pluginName }}</TooltipContent>
       </Tooltip>
     </div>
     <!-- /rightWrapper -->

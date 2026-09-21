@@ -472,7 +472,7 @@ export interface PluginResultViewContribution {
   icon?: string;
 }
 
-export type PluginCommandPresentation = "tab";
+export type PluginCommandPresentation = "tab" | "panel";
 export type PluginCommandReuse = "singleton" | "new";
 export type PluginCommandRestore = "none";
 

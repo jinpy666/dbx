@@ -450,6 +450,11 @@ export default withEnglishFallback({
     dockerUsersRun: "Docker 用户请运行",
     toUpdate: "更新",
   },
+  pluginDock: {
+    close: "关闭面板",
+    collapse: "收起面板",
+    expand: "展开面板",
+  },
   sidebar: {
     connections: "连接",
     pluginEntries: "插件入口",

@@ -528,6 +528,11 @@ export default withEnglishFallback({
     sourceOfficial: "官方來源",
     sourceCnb: "CNB",
   },
+  pluginDock: {
+    close: "關閉面板",
+    collapse: "收起面板",
+    expand: "展開面板",
+  },
   sidebar: {
     connections: "連線",
     pluginEntries: "外掛入口",

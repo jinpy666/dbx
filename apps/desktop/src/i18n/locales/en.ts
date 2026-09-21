@@ -534,6 +534,11 @@ export default {
     dockerUsersRun: "Docker users should run",
     toUpdate: "to update",
   },
+  pluginDock: {
+    close: "Close panel",
+    collapse: "Collapse panel",
+    expand: "Expand panel",
+  },
   sidebar: {
     connections: "CONNECTIONS",
     pluginEntries: "Plugin entries",
