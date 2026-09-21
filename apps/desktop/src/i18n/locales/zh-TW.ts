@@ -530,6 +530,8 @@ export default withEnglishFallback({
   },
   sidebar: {
     connections: "連線",
+    pluginEntries: "外掛入口",
+    pluginEntrySource: "來自外掛：{name}",
     noConnections: "暫無連線",
     importExport: "匯入/匯出",
     import: "匯入連線",

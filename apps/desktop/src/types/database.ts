@@ -472,7 +472,51 @@ export interface PluginResultViewContribution {
   icon?: string;
 }
 
-export type PluginContribution = PluginConnectionProviderContribution | PluginWorkbenchContribution | PluginFilesystemProviderContribution | PluginContextMenuContribution | PluginResultViewContribution;
+export type PluginCommandPresentation = "tab";
+export type PluginCommandReuse = "singleton" | "new";
+export type PluginCommandRestore = "none";
+
+/** v1 ships exactly one action (HOST_PLUGIN_UI_SPEC §4.1): open a declared workbench. */
+export interface PluginOpenWorkbenchAction {
+  type: "open-workbench";
+  /** Workbench contribution of the SAME plugin. */
+  workbench: string;
+  presentation?: PluginCommandPresentation;
+  reuse?: PluginCommandReuse;
+  instance_key?: string;
+  restore?: PluginCommandRestore;
+  /** Opaque plugin payload; the host serves it under `context.plugin`. */
+  context?: Record<string, unknown>;
+}
+
+export interface PluginCommandContribution {
+  type: "command";
+  id: string;
+  label: string;
+  description?: string;
+  icon?: string;
+  action: PluginOpenWorkbenchAction;
+}
+
+export type PluginMenuLocation = "commandPalette" | "appToolbar" | "appSidebar";
+
+export interface PluginMenuItem {
+  location: PluginMenuLocation;
+  /** Short command id of the SAME plugin. */
+  command: string;
+  group: string;
+  order: number;
+  /** Toolbar entries default to hidden; sidebar entries default to visible. */
+  default_visible?: boolean;
+}
+
+export interface PluginMenusContribution {
+  type: "menus";
+  id: string;
+  items: PluginMenuItem[];
+}
+
+export type PluginContribution = PluginConnectionProviderContribution | PluginWorkbenchContribution | PluginFilesystemProviderContribution | PluginContextMenuContribution | PluginResultViewContribution | PluginCommandContribution | PluginMenusContribution;
 
 export interface PluginEngines {
   dbx: string;

@@ -230,6 +230,8 @@ pub enum PluginContribution {
     FilesystemProvider(PluginFilesystemProviderContribution),
     ContextMenu(PluginContextMenuContribution),
     ResultView(PluginResultViewContribution),
+    Command(PluginCommandContribution),
+    Menus(PluginMenusContribution),
 }
 
 impl PluginContribution {
@@ -240,6 +242,8 @@ impl PluginContribution {
             Self::FilesystemProvider(contribution) => &contribution.id,
             Self::ContextMenu(contribution) => &contribution.id,
             Self::ResultView(contribution) => &contribution.id,
+            Self::Command(contribution) => &contribution.id,
+            Self::Menus(contribution) => &contribution.id,
         }
     }
 }
@@ -674,6 +678,115 @@ pub struct PluginResultViewContribution {
     pub icon: Option<String>,
 }
 
+/// Stable sidebar/menu group word list (HOST_PLUGIN_UI_SPEC §5.2). Values
+/// outside this list fail manifest validation instead of being ignored.
+pub const PLUGIN_MENU_GROUPS: &[&str] = &["navigation", "primary", "secondary", "destructive"];
+
+/// Upper bound for one `menus` contribution; keeps registry scans and sidebar
+/// surfaces bounded regardless of what a manifest declares.
+pub const PLUGIN_MENUS_ITEMS_MAX: usize = 64;
+
+/// Upper bound for one command's `context` JSON payload (serialized size).
+pub const PLUGIN_COMMAND_CONTEXT_MAX_BYTES: usize = 64 * 1024;
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PluginCommandPresentation {
+    #[default]
+    Tab,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PluginCommandReuse {
+    #[default]
+    Singleton,
+    New,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PluginCommandRestore {
+    #[default]
+    None,
+}
+
+/// v1 ships exactly one command action: opening a declared workbench. The
+/// workbench reference is resolved against the same plugin's contributions and
+/// the context payload is opaque JSON placed under `context.plugin` by the
+/// host (HOST_PLUGIN_UI_SPEC §4.1).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+pub enum PluginCommandAction {
+    OpenWorkbench(PluginOpenWorkbenchAction),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginOpenWorkbenchAction {
+    /// Workbench contribution of the SAME plugin (dangling references are
+    /// rejected during validation).
+    pub workbench: String,
+    #[serde(default)]
+    pub presentation: PluginCommandPresentation,
+    #[serde(default)]
+    pub reuse: PluginCommandReuse,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance_key: Option<String>,
+    #[serde(default)]
+    pub restore: PluginCommandRestore,
+    /// Opaque plugin payload; served to the workbench under `context.plugin`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginCommandContribution {
+    pub id: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    pub action: PluginCommandAction,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum PluginMenuLocation {
+    #[serde(rename = "commandPalette")]
+    CommandPalette,
+    #[serde(rename = "appToolbar")]
+    AppToolbar,
+    #[serde(rename = "appSidebar")]
+    AppSidebar,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginMenuItem {
+    pub location: PluginMenuLocation,
+    /// Short command id of the SAME plugin (cross-plugin references rejected).
+    pub command: String,
+    pub group: String,
+    pub order: i64,
+    /// Toolbar entries default to hidden; sidebar entries default to visible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_visible: Option<bool>,
+}
+
+/// Declared placement of plugin commands across host surfaces. Entry labels
+/// always come from the referenced command — the menus contribution itself
+/// carries no display text.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginMenusContribution {
+    pub id: String,
+    #[serde(default)]
+    pub items: Vec<PluginMenuItem>,
+}
+
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginFilesystemProviderContribution {
@@ -1041,6 +1154,9 @@ fn validate_contributions(
     let mut filesystem_provider_ids = HashSet::new();
     let mut workbench_references = Vec::new();
     let mut filesystem_references = Vec::new();
+    let mut command_ids = HashSet::new();
+    let mut command_workbench_references = Vec::new();
+    let mut menu_command_references = Vec::new();
 
     for (index, contribution) in contributions.iter().enumerate() {
         let id = contribution.id();
@@ -1173,6 +1289,61 @@ fn validate_contributions(
                     errors.push(format!("Filesystem provider '{id}' requires a backend entrypoint"));
                 }
             }
+            PluginContribution::Command(command) => {
+                validate_required_text(&command.label, &format!("Command '{id}' label"), errors);
+                validate_declared_icon(plugin_dir, &format!("Command '{id}' icon"), command.icon.as_deref(), errors);
+                if valid_identifier(id) {
+                    command_ids.insert(id.to_string());
+                }
+                if !has_ui {
+                    errors.push(format!("Command contribution '{id}' requires a UI entrypoint"));
+                }
+                match &command.action {
+                    PluginCommandAction::OpenWorkbench(action) => {
+                        validate_optional_reference(Some(action.workbench.as_str()), "workbench", id, errors);
+                        command_workbench_references.push((id.to_string(), action.workbench.clone()));
+                        if let Some(context) = &action.context {
+                            let context_bytes = serde_json::to_vec(context).map_or(PLUGIN_COMMAND_CONTEXT_MAX_BYTES + 1, |bytes| bytes.len());
+                            if context_bytes > PLUGIN_COMMAND_CONTEXT_MAX_BYTES {
+                                errors.push(format!(
+                                    "Command '{id}' context exceeds the {PLUGIN_COMMAND_CONTEXT_MAX_BYTES}-byte limit"
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            PluginContribution::Menus(menus) => {
+                if menus.items.len() > PLUGIN_MENUS_ITEMS_MAX {
+                    errors.push(format!(
+                        "Menus contribution '{id}' declares {} items; at most {PLUGIN_MENUS_ITEMS_MAX} are allowed",
+                        menus.items.len()
+                    ));
+                }
+                let mut seen_placements = HashSet::new();
+                for item in &menus.items {
+                    if !PLUGIN_MENU_GROUPS.contains(&item.group.as_str()) {
+                        errors.push(format!(
+                            "Menus contribution '{id}' uses group '{}' outside the host word list ({})",
+                            item.group,
+                            PLUGIN_MENU_GROUPS.join(", ")
+                        ));
+                    }
+                    if item.location == PluginMenuLocation::CommandPalette && item.default_visible.is_some() {
+                        errors.push(format!(
+                            "Menus contribution '{id}' sets default_visible on a commandPalette placement; the command palette has no visibility toggle"
+                        ));
+                    }
+                    if !seen_placements.insert((item.location, item.command.clone())) {
+                        errors.push(format!(
+                            "Menus contribution '{id}' declares placement {:?} for command '{}' more than once",
+                            item.location, item.command
+                        ));
+                    }
+                    validate_optional_reference(Some(item.command.as_str()), "command", id, errors);
+                    menu_command_references.push((id.to_string(), item.command.clone()));
+                }
+            }
         }
     }
 
@@ -1186,6 +1357,16 @@ fn validate_contributions(
             errors.push(format!(
                 "Connection provider '{provider}' references missing filesystem provider '{filesystem_provider}'"
             ));
+        }
+    }
+    for (menus, command) in menu_command_references {
+        if !command_ids.contains(&command) {
+            errors.push(format!("Menus contribution '{menus}' references missing command '{command}'"));
+        }
+    }
+    for (command, workbench) in command_workbench_references {
+        if !workbench_ids.contains(&workbench) {
+            errors.push(format!("Command '{command}' references missing workbench '{workbench}'"));
         }
     }
 }
@@ -1474,9 +1655,151 @@ fn valid_locale_tag(value: &str) -> bool {
 mod tests {
     use super::{
         parse_host_network_permission, resolve_safe_plugin_path, validate_connection_actions,
-        PluginConnectionActionContribution, PluginConnectionProviderContribution, PluginFormFieldBinding,
-        PluginManifest,
+        validate_contributions, PluginCommandAction, PluginCommandContribution, PluginCommandPresentation,
+        PluginCommandReuse, PluginCommandRestore, PluginContribution, PluginConnectionActionContribution,
+        PluginConnectionProviderContribution, PluginFormFieldBinding, PluginManifest, PluginMenuItem,
+        PluginMenuLocation, PluginMenusContribution,
     };
+
+    #[test]
+    fn command_and_menus_contributions_parse_the_frozen_contract() {
+        let command: PluginContribution = serde_json::from_value(serde_json::json!({
+            "type": "command",
+            "id": "open-local-terminal",
+            "label": "Local terminal",
+            "icon": "assets/local-terminal.svg",
+            "action": {
+                "type": "open-workbench",
+                "workbench": "io.dbx.ssh.workbench",
+                "presentation": "tab",
+                "reuse": "singleton",
+                "instance_key": "local-terminal",
+                "restore": "none",
+                "context": { "plugin": { "mode": "local-terminal" } }
+            }
+        }))
+        .unwrap();
+        assert!(matches!(command, PluginContribution::Command(_)));
+
+        // 缺省值按契约：presentation=tab、reuse=singleton、restore=none。
+        let command: PluginCommandContribution = serde_json::from_value(serde_json::json!({
+            "id": "open-thing",
+            "label": "Open",
+            "action": { "type": "open-workbench", "workbench": "wb" }
+        }))
+        .unwrap();
+        let PluginCommandAction::OpenWorkbench(action) = command.action else {
+            unreachable!("open-workbench is the only v1 action");
+        };
+        assert_eq!(action.workbench, "wb");
+        assert_eq!(action.presentation, PluginCommandPresentation::Tab);
+        assert_eq!(action.reuse, PluginCommandReuse::Singleton);
+        assert_eq!(action.restore, PluginCommandRestore::None);
+
+        // §11 冻结的 placement 词表保持 camelCase 原值。
+        let menus: PluginMenusContribution = serde_json::from_value(serde_json::json!({
+            "id": "entrypoints",
+            "items": [
+                { "location": "commandPalette", "command": "open-thing", "group": "primary", "order": 100 },
+                { "location": "appToolbar", "command": "open-thing", "group": "navigation", "order": 100, "default_visible": false },
+                { "location": "appSidebar", "command": "open-thing", "group": "primary", "order": 100, "default_visible": true }
+            ]
+        }))
+        .unwrap();
+        assert_eq!(menus.items.len(), 3);
+        assert_eq!(menus.items[0].location, PluginMenuLocation::CommandPalette);
+        assert_eq!(menus.items[1].location, PluginMenuLocation::AppToolbar);
+        assert_eq!(menus.items[2].location, PluginMenuLocation::AppSidebar);
+
+        // 未知贡献类型、未知 placement、未知枚举值全部拒收。
+        assert!(serde_json::from_value::<PluginContribution>(serde_json::json!({ "type": "view", "id": "x" })).is_err());
+        assert!(serde_json::from_value::<PluginMenuItem>(serde_json::json!({
+            "location": "statusBar", "command": "x", "group": "primary", "order": 1
+        }))
+        .is_err());
+        let mut broken = serde_json::from_value::<PluginCommandAction>(serde_json::json!({
+            "type": "open-workbench", "workbench": "wb", "presentation": "panel"
+        }));
+        assert!(broken.is_err(), "presentation 枚举外的值必须拒收（panel 属后续里程碑）");
+        broken = serde_json::from_value::<PluginCommandAction>(serde_json::json!({
+            "type": "invoke-sidecar", "method": "x"
+        }));
+        assert!(broken.is_err(), "RPC 动作不属于 v1 契约");
+    }
+
+    #[test]
+    fn command_and_menus_validation_rejects_dangling_and_off_wordlist_values() {
+        let plugin_dir = std::env::temp_dir();
+
+        // 合法最小集：command + workbench + menus → 零错误。
+        let valid = vec![
+            serde_json::from_value::<PluginContribution>(serde_json::json!({
+                "type": "workbench", "id": "io.dbx.ssh.workbench", "label": "SSH"
+            }))
+            .unwrap(),
+            serde_json::from_value::<PluginContribution>(serde_json::json!({
+                "type": "command", "id": "open-local-terminal", "label": "Local terminal",
+                "action": { "type": "open-workbench", "workbench": "io.dbx.ssh.workbench" }
+            }))
+            .unwrap(),
+            serde_json::from_value::<PluginContribution>(serde_json::json!({
+                "type": "menus", "id": "entrypoints",
+                "items": [
+                    { "location": "appSidebar", "command": "open-local-terminal", "group": "primary", "order": 100 }
+                ]
+            }))
+            .unwrap(),
+        ];
+        let mut errors = Vec::new();
+        validate_contributions(&valid, false, true, &plugin_dir, &mut errors);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+
+        // 悬空 command 引用拒收。
+        let dangling = vec![serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "menus", "id": "entrypoints",
+            "items": [{ "location": "appSidebar", "command": "missing", "group": "primary", "order": 100 }]
+        }))
+        .unwrap()];
+        let mut errors = Vec::new();
+        validate_contributions(&dangling, false, true, &plugin_dir, &mut errors);
+        assert!(errors.iter().any(|error| error.contains("references missing command 'missing'")), "{errors:?}");
+
+        // command 悬空 workbench 引用拒收。
+        let dangling = vec![serde_json::from_value::<PluginContribution>(serde_json::json!({
+            "type": "command", "id": "cmd", "label": "C",
+            "action": { "type": "open-workbench", "workbench": "missing.workbench" }
+        }))
+        .unwrap()];
+        let mut errors = Vec::new();
+        validate_contributions(&dangling, false, true, &plugin_dir, &mut errors);
+        assert!(errors.iter().any(|error| error.contains("references missing workbench")), "{errors:?}");
+
+        // group 词表外的值拒收；commandPalette 上的 default_visible 拒收。
+        let menus: PluginMenusContribution = serde_json::from_value(serde_json::json!({
+            "id": "entrypoints",
+            "items": [
+                { "location": "appSidebar", "command": "cmd", "group": "vendor-custom", "order": 100 },
+                { "location": "commandPalette", "command": "cmd", "group": "primary", "order": 100, "default_visible": true }
+            ]
+        }))
+        .unwrap();
+        let contributions = vec![PluginContribution::Menus(menus)];
+        let mut errors = Vec::new();
+        validate_contributions(&contributions, false, true, &plugin_dir, &mut errors);
+        assert!(errors.iter().any(|error| error.contains("outside the host word list")), "{errors:?}");
+        assert!(errors.iter().any(|error| error.contains("no visibility toggle")), "{errors:?}");
+
+        // 超 64 KiB 的 command context 拒收。
+        let big: PluginCommandContribution = serde_json::from_value(serde_json::json!({
+            "id": "cmd", "label": "C",
+            "action": { "type": "open-workbench", "workbench": "wb", "context": { "blob": "x".repeat(70_000) } }
+        }))
+        .unwrap();
+        let contributions = vec![PluginContribution::Command(big)];
+        let mut errors = Vec::new();
+        validate_contributions(&contributions, false, true, &plugin_dir, &mut errors);
+        assert!(errors.iter().any(|error| error.contains("exceeds the 65536-byte limit")), "{errors:?}");
+    }
 
     #[test]
     fn connection_provider_proxy_route_defaults_false_and_parses() {

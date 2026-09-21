@@ -8,8 +8,11 @@ const mocks = vi.hoisted(() => ({
   toast: vi.fn(),
 }));
 
-vi.mock("vue-i18n", () => ({
-  useI18n: () => ({ t: (key: string) => key }),
+// PR-A4：AppSidebar 现在经 pluginCommandRegistry 引入 useQueryStore/useI18n
+// 链路，这里对 vue-i18n 做 partial mock，保留其余导出（如 createI18n）。
+vi.mock("vue-i18n", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("vue-i18n")>()),
+  useI18n: () => ({ t: (key: string) => key, locale: { value: "en" } }),
 }));
 
 vi.mock("@/stores/connectionStore", () => ({

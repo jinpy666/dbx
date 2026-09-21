@@ -1,6 +1,7 @@
 import type {
   ConnectionConfig,
   InstalledPlugin,
+  PluginCommandContribution,
   PluginConnectionAction,
   PluginConnectionProviderContribution,
   PluginContribution,
@@ -71,12 +72,46 @@ export class FrontendPluginRegistry {
     return this.listWorkbenches().find((entry) => entry.plugin.manifest.id === pluginId && entry.contribution.id === contributionId);
   }
 
+  listCommands(): PluginContributionEntry<PluginCommandContribution>[] {
+    return this.listContributions("command");
+  }
+
+  findCommand(pluginId: string, contributionId: string): PluginContributionEntry<PluginCommandContribution> | undefined {
+    return this.listCommands().find((entry) => entry.plugin.manifest.id === pluginId && entry.contribution.id === contributionId);
+  }
+
+  /**
+   * PR-A4 appSidebar placements (HOST_PLUGIN_UI_SPEC §5.1): one rendered row
+   * per visible sidebar placement, ordered by `order` then the full command
+   * id so the result never depends on manifest or install order. Toolbar and
+   * command-palette surfaces read the same menus data through listMenus().
+   */
+  listSidebarMenuCommands(): Array<{ plugin: InstalledPlugin; command: PluginCommandContribution; order: number }> {
+    const result: Array<{ plugin: InstalledPlugin; command: PluginCommandContribution; order: number }> = [];
+    for (const definition of this.definitions) {
+      for (const contribution of definition.contributions) {
+        if (contribution.type !== "menus") continue;
+        const placements = contribution.items.filter((item) => item.location === "appSidebar" && item.default_visible !== false).sort((a, b) => a.order - b.order || a.command.localeCompare(b.command));
+        for (const item of placements) {
+          const command = definition.contributions.find((candidate): candidate is PluginCommandContribution => candidate.type === "command" && candidate.id === item.command);
+          if (command) result.push({ plugin: definition.plugin, command, order: item.order });
+        }
+      }
+    }
+    return result;
+  }
+
   private listContributions<T extends PluginContribution["type"]>(type: T): Array<PluginContributionEntry<Extract<PluginContribution, { type: T }>>> {
     return this.definitions
       .filter((definition) => definition.plugin.compatibility.compatible)
       .flatMap((definition) => definition.contributions.filter((contribution): contribution is Extract<PluginContribution, { type: T }> => contribution.type === type).map((contribution) => ({ plugin: definition.plugin, contribution })))
-      .sort((left, right) => `${left.plugin.manifest.name}:${left.contribution.label || left.contribution.id}`.localeCompare(`${right.plugin.manifest.name}:${right.contribution.label || right.contribution.id}`));
+      .sort((left, right) => `${left.plugin.manifest.name}:${pluginContributionSortLabel(left.contribution)}`.localeCompare(`${right.plugin.manifest.name}:${pluginContributionSortLabel(right.contribution)}`));
   }
+}
+
+/** menus 贡献没有自身 label（文案来自其引用的 command），排序键退化为 id。 */
+function pluginContributionSortLabel(contribution: PluginContribution): string {
+  return (contribution as { label?: string }).label || contribution.id;
 }
 
 export function createFrontendPluginRegistry(plugins: readonly InstalledPlugin[], locale = "en"): FrontendPluginRegistry {
@@ -264,6 +299,9 @@ function localizePluginMetadata(plugin: InstalledPlugin, localization?: PluginMa
 }
 
 function localizeContribution(contribution: PluginContribution, localization: PluginContributionLocalization | undefined, pluginName: string): PluginContribution {
+  // Menus entries carry no display text of their own — labels come from the
+  // referenced commands, so they pass through localization untouched.
+  if (contribution.type === "menus") return contribution;
   const fallbackLabel = contribution.type === "connection-provider" ? optionalTrimmed(contribution.label) || optionalTrimmed(pluginName) || contribution.id : contribution.label;
   const localized = {
     ...contribution,
@@ -278,7 +316,7 @@ function localizeContribution(contribution: PluginContribution, localization: Pl
       label: localizedRequiredText(action.label, localization?.actions?.[action.id]?.label),
       description: localizedOptionalText(action.description, localization?.actions?.[action.id]?.description),
     }));
-  } else if (localized.type === "workbench") {
+  } else if (localized.type === "workbench" || localized.type === "command") {
     localized.icon = optionalPluginAssetPath(localized.icon);
   }
   return localized;
