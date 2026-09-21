@@ -78,29 +78,6 @@ describe("normalizeEditorSettings", () => {
     });
   });
 
-  it("normalizes plugin toolbar visibility overrides and tolerates malformed values", () => {
-    // default: no overrides at all — everything follows manifest default_visible.
-    expect(normalizeEditorSettings({}).pluginToolbarHidden).toEqual({});
-    expect(normalizeEditorSettings({ pluginToolbarHidden: null } as any).pluginToolbarHidden).toEqual({});
-    expect(normalizeEditorSettings({ pluginToolbarHidden: ["a.b"] } as any).pluginToolbarHidden).toEqual({});
-    expect(normalizeEditorSettings({ pluginToolbarHidden: "yes" } as any).pluginToolbarHidden).toEqual({});
-    // valid boolean overrides are kept; invalid keys/values and empty keys are dropped.
-    expect(
-      normalizeEditorSettings({
-        pluginToolbarHidden: {
-          "dbx-terminal.openTerminal": true,
-          "dbx-ai.run": false,
-          "dbx-broken.bad": "true",
-          "dbx-broken.bad2": 1,
-          " ": true,
-        },
-      } as any).pluginToolbarHidden,
-    ).toEqual({
-      "dbx-terminal.openTerminal": true,
-      "dbx-ai.run": false,
-    });
-  });
-
   it("defaults and bounds the persisted text filter panel height", () => {
     expect(normalizeEditorSettings({}).dataGridTextFilterPanelHeight).toBe(168);
     expect(normalizeEditorSettings({ dataGridTextFilterPanelHeight: 236.4 }).dataGridTextFilterPanelHeight).toBe(236);

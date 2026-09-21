@@ -4,14 +4,13 @@
 // panel webviews, with zero plugin business inside; multi-terminal/shell selection/connection switching all live in the plugin
 // the plugin's own panel page via the bridge openWorkbench, which adds another dock entry).
 // Each entry owns a host-stable workbenchId; v-show keeps sessions alive while switching tabs.
-import { computed, ref, watch } from "vue";
+import { computed, onScopeDispose, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { ChevronDown, ChevronUp, Maximize2, Minimize2, Plus, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import PluginIcon from "@/components/plugins/PluginIcon.vue";
 import PluginWorkbenchHost from "@/components/plugins/PluginWorkbenchHost.vue";
-import LightDropdown from "@/components/ui/LightDropdown.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { activatePluginDockEntry, addPluginDockEntry, closePluginDockEntry, setDockMaximized, setDockVisible, usePluginBottomDock } from "@/lib/plugins/pluginBottomDock";
 import { executePluginCommand } from "@/lib/plugins/pluginCommandRegistry";
@@ -94,12 +93,6 @@ const connectionTargets = computed(() => {
   const providers = activePluginProviders.value;
   return connectionStore.connections.filter((connection) => providers.has(connection.plugin_connection_provider ?? "")).map((connection) => ({ key: `conn:${connection.id}`, label: connection.name || connection.id, connection }));
 });
-
-const plusItems = computed(() => [
-  { value: "replay", label: t("pluginDock.newTerminal") },
-  ...launchOptionEntries.value.map((entry) => ({ value: `opt:${launchOptionEntries.value.indexOf(entry)}`, label: entry.label, description: entry.description })),
-  ...connectionTargets.value.map((target) => ({ value: target.key, label: `${t("pluginDock.connectionTerminal")} · ${target.label}` })),
-]);
 
 function onPlusAction(value: string) {
   if (value === "replay") {
@@ -190,12 +183,18 @@ function hideDock() {
 }
 
 // Drag the top edge to resize the height (min 140px, up to 80% of the window).
+// Dragging always exits maximized/collapsed: the start height is the currently
+// rendered pixel height, so the transition is seamless.
+const dockRoot = ref<HTMLElement>();
 const resizing = ref(false);
 function startResize(event: PointerEvent) {
   event.preventDefault();
   resizing.value = true;
+  const startHeight = dockRoot.value?.offsetHeight ?? dockHeight.value;
+  setDockMaximized(false);
+  collapsed.value = false;
+  dockHeight.value = Math.max(startHeight, DOCK_MIN_HEIGHT_PX);
   const startY = event.clientY;
-  const startHeight = dockHeight.value;
   const onMove = (moveEvent: PointerEvent) => {
     const next = startHeight - (moveEvent.clientY - startY);
     dockHeight.value = Math.min(Math.max(next, DOCK_MIN_HEIGHT_PX), Math.floor(window.innerHeight * 0.8));
@@ -208,10 +207,29 @@ function startResize(event: PointerEvent) {
   window.addEventListener("pointermove", onMove);
   window.addEventListener("pointerup", onUp);
 }
+
+// "+" picker menu: anchored below the + button, bottom-stuck inside the dock,
+// growing upward with content (capped by the dock body), closed by selecting
+// an item or clicking anywhere else.
+const plusOpen = ref(false);
+const plusRoot = ref<HTMLElement>();
+function togglePlusMenu() {
+  plusOpen.value = !plusOpen.value;
+  if (plusOpen.value) void loadLaunchOptions();
+}
+function closePlusMenu() {
+  plusOpen.value = false;
+}
+const onPlusMenuOutsidePointerDown = (event: PointerEvent) => {
+  const root = plusRoot.value;
+  if (plusOpen.value && root && !root.contains(event.target as Node)) closePlusMenu();
+};
+window.addEventListener("pointerdown", onPlusMenuOutsidePointerDown, true);
+onScopeDispose(() => window.removeEventListener("pointerdown", onPlusMenuOutsidePointerDown, true));
 </script>
 
 <template>
-  <div v-if="visible" data-plugin-bottom-dock class="relative z-10 flex shrink-0 flex-col overflow-hidden border-t bg-background" :style="{ height: maximized ? '70vh' : collapsed ? '2.25rem' : `${dockHeight}px` }">
+  <div v-if="visible" ref="dockRoot" data-plugin-bottom-dock class="relative z-10 flex shrink-0 flex-col overflow-hidden border-t bg-background" :style="{ height: maximized ? '70vh' : collapsed ? '2.25rem' : `${dockHeight}px` }">
     <div data-plugin-dock-resize-handle class="absolute inset-x-0 top-0 z-10 h-1.5 cursor-row-resize hover:bg-primary/30" @pointerdown="startResize" />
     <div class="flex h-9 shrink-0 items-center gap-1 border-b bg-muted/30 pl-2 pr-3">
       <div class="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto" data-plugin-dock-tabs>
@@ -231,23 +249,28 @@ function startResize(event: PointerEvent) {
         </button>
       </div>
       <span class="flex-1" />
-      <LightDropdown
-        v-if="activeCommand"
-        model-value=""
-        :items="plusItems"
-        :aria-label="t('pluginDock.newTerminal')"
-        :trigger-title="t('pluginDock.newTerminal')"
-        trigger-class="inline-flex h-7 w-7 items-center justify-center rounded-md outline-none hover:bg-muted"
-        :show-trigger-label="false"
-        :show-chevron="false"
-        :highlight-selected="false"
-        align="end"
-        @update:model-value="onPlusAction"
-      >
-        <template #trigger-icon>
-          <Plus class="h-4 w-4" />
-        </template>
-      </LightDropdown>
+      <div v-if="activeCommand" ref="plusRoot" class="relative">
+        <Tooltip :delay-duration="200">
+          <TooltipTrigger as-child>
+            <Button variant="ghost" size="icon" class="h-7 w-7" :aria-label="t('pluginDock.newTerminal')" :aria-expanded="plusOpen" @click="togglePlusMenu">
+              <Plus class="h-4 w-4" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>{{ t("pluginDock.newTerminal") }}</TooltipContent>
+        </Tooltip>
+        <div v-if="plusOpen" data-plugin-dock-plus-menu class="absolute right-0 top-full z-30 mt-1 max-h-[50vh] w-64 overflow-y-auto rounded-md border bg-background p-1 shadow-lg" role="menu">
+          <button class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs hover:bg-muted" role="menuitem" @click="onPlusAction('replay')">
+            <Plus class="h-3.5 w-3.5 shrink-0" />
+            <span class="truncate">{{ t("pluginDock.newTerminal") }}</span>
+          </button>
+          <button v-for="option in launchOptionEntries" :key="option.key" class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs hover:bg-muted" role="menuitem" @click="onPlusAction(option.key)">
+            <span class="truncate">{{ option.label }}</span>
+          </button>
+          <button v-for="target in connectionTargets" :key="target.key" class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs hover:bg-muted" role="menuitem" :title="target.connection.name" @click="onPlusAction(target.key)">
+            <span class="truncate">{{ t("pluginDock.connectionTerminal") }} · {{ target.label }}</span>
+          </button>
+        </div>
+      </div>
       <Tooltip :delay-duration="200">
         <TooltipTrigger as-child>
           <Button variant="ghost" size="icon" class="h-7 w-7" :title="maximized ? t('pluginDock.restore') : t('pluginDock.maximize')" :aria-label="maximized ? t('pluginDock.restore') : t('pluginDock.maximize')" @click="setDockMaximized(!maximized)">

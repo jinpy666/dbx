@@ -25,8 +25,6 @@ export interface SettingsSearchDefinition {
   titleKey?: string;
   title?: string;
   descriptionKey?: string;
-  /** A literal description for entries whose text is not a translation key. */
-  description?: string;
   /** Identifies a built-in shortcut row so its local filter can be restored on navigation. */
   shortcutId?: string;
   route?: SettingsSearchRoute;
@@ -86,29 +84,6 @@ export function createToolbarVisibilitySettingsSearchDefinitions(items: readonly
     id: `appearance-toolbar-${item.key}`,
     category: "appearance",
     ...(item.titleKey ? { titleKey: item.titleKey } : { title: item.title }),
-    targetId: "appearance",
-  }));
-}
-
-/** Minimal shape of an installed plugin's appToolbar command, mirroring the manifest contributions. */
-export interface PluginToolbarCommandSearchSource {
-  pluginId: string;
-  pluginName: string;
-  commandId: string;
-  label: string;
-}
-
-/**
- * Plugin toolbar visibility toggles are a dynamic list (depends on installed
- * plugins), so their search entries are derived from the same list the settings
- * page renders — a new plugin command can never be absent from search.
- */
-export function createPluginToolbarCommandSearchDefinitions(commands: readonly PluginToolbarCommandSearchSource[]): SettingsSearchDefinition[] {
-  return commands.map((command) => ({
-    id: `appearance-plugin-toolbar-${command.pluginId}.${command.commandId}`,
-    category: "appearance",
-    title: command.label,
-    description: command.pluginName,
     targetId: "appearance",
   }));
 }
@@ -313,7 +288,7 @@ export function resolveSettingsSearchEntries(definitions: readonly SettingsSearc
       id: definition.id,
       category: definition.category,
       title: definition.titleKey ? translate(definition.titleKey) : (definition.title ?? ""),
-      description: definition.descriptionKey ? translate(definition.descriptionKey) : (definition.description ?? ""),
+      description: definition.descriptionKey ? translate(definition.descriptionKey) : "",
       categoryLabel: categoryLabels[definition.category],
       targetId: definition.targetId ?? definition.category,
       shortcutId: definition.shortcutId,

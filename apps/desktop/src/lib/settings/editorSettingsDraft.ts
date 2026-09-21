@@ -1,5 +1,4 @@
 import type { EditorSettings } from "@/stores/settingsStore";
-import { normalizePluginToolbarHidden } from "@/stores/settingsStore";
 import { normalizeBackgroundImageSettings } from "@/lib/app/appBackgroundImage";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
 import { normalizeQueryResultMaxRows } from "@/lib/dataGrid/queryResultRowLimit";
@@ -119,7 +118,6 @@ export const EDITOR_SETTINGS_DRAFT_KEYS = [
   "globalDateTimeImportFormat",
   "updateDownloadSource",
   "toolbarItems",
-  "pluginToolbarHidden",
   "snippets",
   "sqlShortcuts",
   "sqlVariableSubstitutionEnabled",
@@ -154,7 +152,6 @@ function normalizedDraftValue(key: EditorSettingsDraftKey, value: unknown): unkn
   if (key === "completionTriggerMode") return normalizeCompletionTriggerMode(value);
   if (key === "tableHoverLookupMode") return normalizeTableHoverLookupMode(value);
   if (key === "redisKeyTemplates") return normalizeRedisKeyTemplates(value);
-  if (key === "pluginToolbarHidden") return normalizePluginToolbarHidden(value);
   if (key === "backgroundImage") return normalizeBackgroundImageSettings(value);
   return value;
 }

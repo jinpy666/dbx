@@ -6091,8 +6091,6 @@ export default withEnglishFallback({
     fontSize: "字級",
     toolbarTitle: "工具列",
     toolbarHiddenHint: "部分關閉或空間不足的按鈕會自動收進「更多」下拉選單。",
-    pluginToolbarCommands: "外掛命令",
-    pluginToolbarCommandsHint: "顯示或隱藏已安裝外掛提供的工具列入口。",
     exclusiveRightSidebarPanels: "右側邊欄一次僅顯示一個面板",
     exclusiveRightSidebarPanelsDescription: "開啟一個右側面板時關閉其他面板。關閉此選項可同時顯示多個面板。",
     uiScale: "介面縮放",

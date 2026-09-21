@@ -71,7 +71,7 @@ export function serializeSettingsTransfer(settings: EditorSettings, meta: Settin
 const SETTINGS_TRANSFER_CATEGORY_ORDER: readonly SettingsTransferCategoryId[] = ["appearance", "editor", "formatter", "navigation", "data", "shortcuts", "snippets", "other"];
 
 const SETTINGS_TRANSFER_CATEGORY_KEYS: Record<SettingsTransferCategoryId, readonly EditorSettingsDraftKey[]> = {
-  appearance: ["fontFamily", "fontSize", "tableFontFamily", "uiFontFamily", "uiScale", "theme", "customThemes", "activeCustomThemeId", "backgroundImage", "toolbarItems", "pluginToolbarHidden"],
+  appearance: ["fontFamily", "fontSize", "tableFontFamily", "uiFontFamily", "uiScale", "theme", "customThemes", "activeCustomThemeId", "backgroundImage", "toolbarItems"],
   editor: [
     "executeMode",
     "defaultTransactionMode",
@@ -400,16 +400,6 @@ function isRawToolbarItemsShape(value: unknown): boolean {
   return isPlainObject(value) && Object.entries(value).every(([key, entry]) => !(key in DEFAULT_TOOLBAR_ITEMS) || typeof entry === "boolean");
 }
 
-/**
- * Raw shape: every value must already be a boolean. normalizePluginToolbarHidden
- * would silently drop malformed entries instead of failing the import, so
- * requiring booleans up front keeps a hand-edited transfer file honest about
- * what it is overriding.
- */
-function isRawPluginToolbarHiddenShape(value: unknown): boolean {
-  return isPlainObject(value) && Object.values(value).every((entry) => typeof entry === "boolean");
-}
-
 const SQL_VARIABLE_SYNTAX_KEY_SET = new Set<string>(SQL_VARIABLE_SYNTAX_KEYS);
 
 function isSqlVariableSyntaxOverridesShape(value: unknown, isAllowedToggle: (toggle: unknown) => boolean): boolean {
@@ -454,7 +444,6 @@ const RAW_STRUCTURED_FIELD_VALIDATORS: Partial<Record<EditorSettingsDraftKey, (v
   tableColumnTemplateFields: isStringArray,
   shortcuts: isRawShortcutSettingsShape,
   toolbarItems: isRawToolbarItemsShape,
-  pluginToolbarHidden: isRawPluginToolbarHiddenShape,
   sqlFormatter: isCompleteSqlFormatterSettings,
   sidebarHiddenTablePrefixes: isStringArray,
   redisKeyTemplates: isStringArray,

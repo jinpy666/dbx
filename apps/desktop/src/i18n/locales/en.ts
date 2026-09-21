@@ -7200,8 +7200,6 @@ export default {
     fontSize: "Font Size",
     toolbarTitle: "Toolbar",
     toolbarHiddenHint: 'Some hidden or overflowed buttons appear in the "More" dropdown.',
-    pluginToolbarCommands: "Plugin commands",
-    pluginToolbarCommandsHint: "Show or hide the toolbar entries contributed by installed plugins.",
     exclusiveRightSidebarPanels: "Show one right sidebar panel at a time",
     exclusiveRightSidebarPanelsDescription: "Opening a right sidebar panel closes the others. Disable this to allow multiple panels.",
     uiScale: "UI Scale",

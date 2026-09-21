@@ -906,8 +906,6 @@ export interface EditorSettings {
   updateDownloadSource: UpdateDownloadSource;
   ignoredUpdateVersion: string;
   toolbarItems: ToolbarItems;
-  /** Visibility overrides for plugin toolbar commands; key = `${pluginId}.${commandId}`, true = hidden, defaults follow manifest default_visible. */
-  pluginToolbarHidden: Record<string, boolean>;
   objectBrowserShowCheckbox: boolean;
   objectBrowserViewMode: "list" | "grid";
   sqlVariableSubstitutionEnabled: boolean;
@@ -1161,7 +1159,6 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   updateDownloadSource: "official",
   ignoredUpdateVersion: "",
   toolbarItems: { ...DEFAULT_TOOLBAR_ITEMS },
-  pluginToolbarHidden: {},
   objectBrowserShowCheckbox: false,
   objectBrowserViewMode: "list",
   sqlVariableSubstitutionEnabled: true,
@@ -1445,22 +1442,6 @@ function normalizeToolbarItems(items: Partial<ToolbarItems> | undefined): Toolba
   };
 }
 
-/**
- * Visibility overrides for plugin toolbar commands: key = `${pluginId}.${commandId}`, true = hidden,
- * false = explicitly shown, missing = follow the manifest default_visible. Invalid keys/values are dropped,
- * so dirty values in old data fall back to the manifest default behavior.
- */
-export function normalizePluginToolbarHidden(value: unknown): Record<string, boolean> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-  const hidden: Record<string, boolean> = {};
-  for (const [rawKey, rawHidden] of Object.entries(value as Record<string, unknown>).slice(0, 500)) {
-    const key = rawKey.trim();
-    if (!key || typeof rawHidden !== "boolean") continue;
-    hidden[key] = rawHidden;
-  }
-  return hidden;
-}
-
 const TABLE_INFO_TABS = new Set<TableInfoTab>(["ddl", "columns", "indexes", "foreignKeys", "constraints", "triggers"]);
 
 function normalizeTableInfoTab(value: unknown): TableInfoTab {
@@ -1733,7 +1714,6 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     updateDownloadSource: normalizeUpdateDownloadSource(settings.updateDownloadSource),
     ignoredUpdateVersion: typeof settings.ignoredUpdateVersion === "string" ? settings.ignoredUpdateVersion : DEFAULT_EDITOR_SETTINGS.ignoredUpdateVersion,
     toolbarItems: normalizeToolbarItems(settings.toolbarItems),
-    pluginToolbarHidden: normalizePluginToolbarHidden(settings.pluginToolbarHidden),
     objectBrowserShowCheckbox: typeof settings.objectBrowserShowCheckbox === "boolean" ? settings.objectBrowserShowCheckbox : DEFAULT_EDITOR_SETTINGS.objectBrowserShowCheckbox,
     objectBrowserViewMode: settings.objectBrowserViewMode === "grid" ? "grid" : DEFAULT_EDITOR_SETTINGS.objectBrowserViewMode,
     sqlVariableSubstitutionEnabled: typeof settings.sqlVariableSubstitutionEnabled === "boolean" ? settings.sqlVariableSubstitutionEnabled : DEFAULT_EDITOR_SETTINGS.sqlVariableSubstitutionEnabled,
@@ -2482,7 +2462,6 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.updateDownloadSource !== undefined) editorSettings.value.updateDownloadSource = normalizeUpdateDownloadSource(partial.updateDownloadSource);
     if (partial.ignoredUpdateVersion !== undefined) editorSettings.value.ignoredUpdateVersion = typeof partial.ignoredUpdateVersion === "string" ? partial.ignoredUpdateVersion : "";
     if (partial.toolbarItems !== undefined) editorSettings.value.toolbarItems = normalizeToolbarItems(partial.toolbarItems);
-    if (partial.pluginToolbarHidden !== undefined) editorSettings.value.pluginToolbarHidden = normalizePluginToolbarHidden(partial.pluginToolbarHidden);
     if (partial.objectBrowserShowCheckbox !== undefined) editorSettings.value.objectBrowserShowCheckbox = partial.objectBrowserShowCheckbox === true;
     if (partial.objectBrowserViewMode !== undefined) editorSettings.value.objectBrowserViewMode = partial.objectBrowserViewMode === "grid" ? "grid" : "list";
     if (partial.sqlVariableSubstitutionEnabled !== undefined) editorSettings.value.sqlVariableSubstitutionEnabled = partial.sqlVariableSubstitutionEnabled === true;
