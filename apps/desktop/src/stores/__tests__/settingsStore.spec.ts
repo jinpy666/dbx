@@ -78,6 +78,29 @@ describe("normalizeEditorSettings", () => {
     });
   });
 
+  it("normalizes plugin toolbar visibility overrides and tolerates malformed values", () => {
+    // 缺省：无任何覆盖，全部跟随 manifest default_visible。
+    expect(normalizeEditorSettings({}).pluginToolbarHidden).toEqual({});
+    expect(normalizeEditorSettings({ pluginToolbarHidden: null } as any).pluginToolbarHidden).toEqual({});
+    expect(normalizeEditorSettings({ pluginToolbarHidden: ["a.b"] } as any).pluginToolbarHidden).toEqual({});
+    expect(normalizeEditorSettings({ pluginToolbarHidden: "yes" } as any).pluginToolbarHidden).toEqual({});
+    // 合法 boolean 覆盖保留；非法键值、空键直接丢弃。
+    expect(
+      normalizeEditorSettings({
+        pluginToolbarHidden: {
+          "dbx-terminal.openTerminal": true,
+          "dbx-ai.run": false,
+          "dbx-broken.bad": "true",
+          "dbx-broken.bad2": 1,
+          " ": true,
+        },
+      } as any).pluginToolbarHidden,
+    ).toEqual({
+      "dbx-terminal.openTerminal": true,
+      "dbx-ai.run": false,
+    });
+  });
+
   it("defaults and bounds the persisted text filter panel height", () => {
     expect(normalizeEditorSettings({}).dataGridTextFilterPanelHeight).toBe(168);
     expect(normalizeEditorSettings({ dataGridTextFilterPanelHeight: 236.4 }).dataGridTextFilterPanelHeight).toBe(236);
