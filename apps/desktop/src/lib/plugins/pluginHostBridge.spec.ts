@@ -3,9 +3,9 @@ import { reactive, readonly } from "vue";
 import { PluginHostBridge, pluginSandboxDocument, pluginSdkSource } from "./pluginHostBridge";
 import type { InstalledPlugin, PluginWorkbenchContribution } from "@/types/database";
 
-function plugin(permissions: string[] = []): InstalledPlugin {
+function plugin(permissions: string[] = [], contributions: InstalledPlugin["manifest"]["contributions"] = []): InstalledPlugin {
   return {
-    manifest: { id: "sample", name: "Sample", version: "1.0.0", permissions, drivers: [], contributions: [] },
+    manifest: { id: "sample", name: "Sample", version: "1.0.0", permissions, drivers: [], contributions },
     compatibility: { compatible: true },
   };
 }
@@ -13,6 +13,30 @@ function plugin(permissions: string[] = []): InstalledPlugin {
 const workbench: PluginWorkbenchContribution = { type: "workbench", id: "sample.main", label: "Sample" };
 
 describe("PluginHostBridge", () => {
+  it("host.listConnections returns a read-only secret-free list scoped to the calling plugin", async () => {
+    const messages: unknown[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const listConnections = vi.fn(() => [{ id: "conn-1", name: "Prod", providerId: "sample.connection", connectionType: "sample", readOnly: true }]);
+    const contributions = [
+      { type: "connection-provider", id: "sample.connection", label: "Sample", database_type: "sample", fields: [] },
+      { type: "workbench", id: "sample.main", label: "Sample" },
+    ] as InstalledPlugin["manifest"]["contributions"];
+    const bridge = new PluginHostBridge(plugin(["host.workbench"], contributions), workbench, {}, () => target, {
+      invoke: vi.fn(),
+      notify: vi.fn(),
+      sendBinary: vi.fn(),
+      readAsset: vi.fn(),
+      listConnections,
+    });
+
+    bridge.handleWindowMessage({
+      source: target,
+      data: { source: "dbx-plugin", version: 1, type: "request", id: "9", method: "host.listConnections", params: {} },
+    } as MessageEvent);
+    await vi.waitFor(() => expect(listConnections).toHaveBeenCalledWith("sample"));
+    expect(messages[0]).toMatchObject({ source: "dbx-host", type: "response", id: "9", result: [{ id: "conn-1", name: "Prod", providerId: "sample.connection", readOnly: true }] });
+  });
+
   it("binds backend calls to the owning plugin identity", async () => {
     const messages: unknown[] = [];
     const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;

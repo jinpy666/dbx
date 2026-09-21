@@ -40,13 +40,17 @@ export interface AddPluginDockEntryPayload {
 /** Creates (and activates) a dock terminal entry; returns its stable id. */
 export function addPluginDockEntry(payload: AddPluginDockEntryPayload): string {
   const id = uuid();
+  // 同一命令已存在条目时标题追加序号（通用：Local terminal 1 / 2 …），
+  // 避免多实例面板在 tab 条上无法区分。
+  const siblings = dockEntries.value.filter((entry) => entry.pluginId === payload.pluginId && entry.commandId === payload.commandId);
+  const title = siblings.length ? `${payload.title} ${siblings.length + 1}` : payload.title;
   dockEntries.value.push({
     id,
     pluginId: payload.pluginId,
     workbenchContributionId: payload.workbenchContributionId,
     kind: payload.kind,
     commandId: payload.commandId,
-    title: payload.title,
+    title,
     icon: payload.icon,
     context: {
       ...(payload.commandContext ?? {}),

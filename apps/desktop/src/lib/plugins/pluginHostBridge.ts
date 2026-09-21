@@ -53,6 +53,12 @@ export interface PluginHostBridgeApi {
   openFilesystem?(pluginId: string, providerId: string, context?: PluginWorkbenchContext): Promise<void> | void;
   /** Explicit user-triggered reconnect of an owned plugin connection (full flow, interactive password prompt allowed). */
   reopenConnection?(pluginId: string, connectionId: string): Promise<void>;
+  /**
+   * PR-A4 通用扩展点：只读、无密钥的连接清单，仅返回「调用插件自己的
+   * connection-provider」名下的连接，供插件在面板/工作台内做连接切换等
+   * 自有业务（宿主不感知用途）。
+   */
+  listConnections?(pluginId: string): Array<{ id: string; name: string; providerId: string; connectionType?: string; readOnly: boolean }>;
   closeTab?(): Promise<void> | void;
   /** Persist plugin bytes through the host's native save dialog. Resolves null when the user cancels. */
   saveFile?(pluginId: string, request: PluginSaveFileRequest, data: Uint8Array): Promise<PluginSaveFileResult | null>;
@@ -255,6 +261,11 @@ export class PluginHostBridge {
       const input = requireRecord(params, "host.reopenConnection params");
       await this.api.reopenConnection(this.plugin.manifest.id, requireProtocolName(input.connectionId, "connectionId"));
       return { ok: true };
+    }
+    if (method === "host.listConnections") {
+      this.requirePermission("host.workbench");
+      if (!this.api.listConnections) throw new Error("Connection enumeration is unavailable on this host");
+      return this.api.listConnections(this.plugin.manifest.id);
     }
     if (method === "host.openFilesystem") {
       this.requirePermission("host.filesystem");

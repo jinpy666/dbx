@@ -11,7 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import PluginIcon from "@/components/plugins/PluginIcon.vue";
 import PluginWorkbenchHost from "@/components/plugins/PluginWorkbenchHost.vue";
-import { activatePluginDockEntry, addPluginDockEntry, closePluginDockEntry, setDockMaximized, usePluginBottomDock } from "@/lib/plugins/pluginBottomDock";
+import { activatePluginDockEntry, addPluginDockEntry, closePluginDockEntry, setDockMaximized, setDockVisible, usePluginBottomDock } from "@/lib/plugins/pluginBottomDock";
 import { executePluginCommand } from "@/lib/plugins/pluginCommandRegistry";
 import { createFrontendPluginRegistry } from "@/lib/plugins/frontendPlugin";
 import { useQueryStore } from "@/stores/queryStore";
@@ -81,6 +81,13 @@ function onPanelOpenWorkbench(entry: (typeof entries.value)[number], _contributi
   activatePluginDockEntry(id);
 }
 
+// 隐藏面板：终端会话保留（VS Code 语义），重开工具栏图标即恢复。
+function hideDock() {
+  collapsed.value = false;
+  setDockMaximized(false);
+  setDockVisible(false);
+}
+
 // 顶边拖拽调整高度（min 140px，至多窗口 80%）。
 const resizing = ref(false);
 function startResize(event: PointerEvent) {
@@ -139,17 +146,7 @@ function startResize(event: PointerEvent) {
         <ChevronUp v-if="collapsed" class="h-3.5 w-3.5" />
         <ChevronDown v-else class="h-3.5 w-3.5" />
       </Button>
-      <Button
-        variant="ghost"
-        size="icon"
-        class="h-7 w-7"
-        :title="t('pluginDock.hide')"
-        :aria-label="t('pluginDock.hide')"
-        @click="
-          collapsed = false;
-          setDockMaximized(false);
-        "
-      >
+      <Button variant="ghost" size="icon" class="h-7 w-7" :title="t('pluginDock.hide')" :aria-label="t('pluginDock.hide')" @click="hideDock">
         <X class="h-3.5 w-3.5" />
       </Button>
     </div>
