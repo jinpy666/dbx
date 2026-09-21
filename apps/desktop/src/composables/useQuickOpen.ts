@@ -1,4 +1,4 @@
-import { computed, ref, watch } from "vue";
+import { computed, ref, watch, type Ref } from "vue";
 import type { ConnectionConfig } from "@/types/database";
 import type { SqlCompletionTable } from "@/lib/sql/sqlCompletion";
 import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
@@ -28,7 +28,7 @@ const REMOTE_SEARCH_UNSUPPORTED_TYPES = new Set<ConnectionConfig["db_type"]>(["r
 
 export interface QuickOpenItem {
   id: string;
-  type: "connection" | "database" | "schema" | "table" | "view" | "materialized_view" | "procedure" | "function" | "sequence" | "package" | "package-body" | "sql_file" | "sql_library_file" | "content_match";
+  type: "connection" | "database" | "schema" | "table" | "view" | "materialized_view" | "procedure" | "function" | "sequence" | "package" | "package-body" | "sql_file" | "sql_library_file" | "content_match" | "plugin_command";
   label: string;
   description?: string;
   connectionId: string;
@@ -46,6 +46,17 @@ export interface QuickOpenItem {
   matchText?: string; // For content matches: matched slice
   lineText?: string; // For content matches: full matching line
   highlightIndices?: [number, number]; // For content matches: [start, end) chars into lineText to highlight
+  pluginId?: string; // For plugin commands: 来源插件 id
+  commandId?: string; // For plugin commands: 命令贡献短 id
+  pluginName?: string; // For plugin commands: 来源插件显示名（出处提示）
+}
+
+export interface UseQuickOpenOptions {
+  /**
+   * 外部补充条目（如插件 commandPalette 命令）：并入初始列表与搜索结果池，
+   * 由调用方负责刷新；无查询时按注入顺序追加在既有条目之后。
+   */
+  extraItems?: Ref<QuickOpenItem[]>;
 }
 
 export type QuickOpenMatchKind = "exact" | "initials" | "prefix" | "word-prefix" | "substring" | "fuzzy";
@@ -268,9 +279,10 @@ function collectSqlFileEntries(entries: SqlFileEntry[], results: SqlFileEntry[])
   }
 }
 
-export function useQuickOpen() {
+export function useQuickOpen(options: UseQuickOpenOptions = {}) {
   const connectionStore = useConnectionStore();
   const savedSqlStore = useSavedSqlStore();
+  const extraItems = options.extraItems;
   const searchQuery = ref("");
   const selectedIndex = ref(0);
   const remoteItems = ref<QuickOpenItem[]>([]);
@@ -867,7 +879,7 @@ export function useQuickOpen() {
   const filteredItems = computed((): MatchedItem[] => {
     if (!searchQuery.value.trim()) {
       // Show all tree items plus a limited set of recent SQL library files and external SQL files
-      return [...allItems.value, ...sqlLibraryRecentItems.value, ...sqlFileRecentItems.value].map((item) => ({
+      return [...allItems.value, ...sqlLibraryRecentItems.value, ...sqlFileRecentItems.value, ...(extraItems?.value ?? [])].map((item) => ({
         ...item,
         matchScore: Infinity,
         matchIndices: [],
@@ -878,7 +890,7 @@ export function useQuickOpen() {
 
     const seen = new Set<string>();
     // When searching, include ALL SQL library files and external SQL files
-    for (const item of [...allItems.value, ...sqlLibraryAllItems.value, ...sqlFileItems.value, ...remoteItems.value]) {
+    for (const item of [...allItems.value, ...sqlLibraryAllItems.value, ...sqlFileItems.value, ...remoteItems.value, ...(extraItems?.value ?? [])]) {
       const key = quickOpenItemKey(item);
       if (seen.has(key)) continue;
       seen.add(key);
@@ -915,6 +927,7 @@ export function useQuickOpen() {
         sql_library_file: 11,
         sql_file: 12,
         content_match: 13,
+        plugin_command: 14,
       };
       const typeDifference = typeOrder[a.type] - typeOrder[b.type];
       if (typeDifference !== 0) return typeDifference;
