@@ -248,7 +248,6 @@ onScopeDispose(() => window.removeEventListener("pointerdown", onPlusMenuOutside
           </span>
         </button>
       </div>
-      <span class="flex-1" />
       <div v-if="activeCommand" ref="plusRoot" class="relative">
         <Tooltip :delay-duration="200">
           <TooltipTrigger as-child>
