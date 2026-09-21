@@ -1829,9 +1829,8 @@ mod tests {
             "action": { "type": "open-workbench", "workbench": "wb" }
         }))
         .unwrap();
-        let PluginCommandAction::OpenWorkbench(action) = command.action else {
-            unreachable!("open-workbench is the only v1 action");
-        };
+        // v1 ships exactly one action type, so this pattern always matches.
+        let PluginCommandAction::OpenWorkbench(action) = command.action;
         assert_eq!(action.workbench, "wb");
         assert_eq!(action.presentation, PluginCommandPresentation::Tab);
         assert_eq!(action.reuse, PluginCommandReuse::Singleton);
@@ -1893,7 +1892,7 @@ mod tests {
         }))
         .unwrap();
         let mut errors = Vec::new();
-        validate_contributions(&[workbench.clone()], false, true, &plugin_dir, &mut errors);
+        validate_contributions(std::slice::from_ref(&workbench), false, true, &plugin_dir, &mut errors);
         assert!(errors.is_empty(), "{errors:?}");
         let mut errors = Vec::new();
         validate_contributions(&[workbench, command], false, true, &plugin_dir, &mut errors);
@@ -1959,11 +1958,7 @@ mod tests {
         validate_contributions(&[bad_value], false, true, &plugin_dir, &mut errors);
         assert!(errors.iter().any(|e| e.contains("non-empty string array")), "{errors:?}");
 
-        // clause-count cap rejects.
-        let clauses: Vec<serde_json::Value> = (0..20)
-            .map(|index| serde_json::json!({ "key": "surface", "operator": "equals", "value": "tab", "__i": index }))
-            .collect();
-        // __i is an unknown field; drop it and use 20 valid surface clauses instead.
+        // clause-count cap rejects 20 valid surface clauses.
         let clauses: Vec<serde_json::Value> =
             (0..20).map(|_| serde_json::json!({ "key": "surface", "operator": "equals", "value": "tab" })).collect();
         let too_many = serde_json::from_value::<PluginContribution>(serde_json::json!({
