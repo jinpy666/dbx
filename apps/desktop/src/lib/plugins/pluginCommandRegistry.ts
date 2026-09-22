@@ -9,7 +9,7 @@ import { onScopeDispose, ref, shallowRef, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import * as api from "@/lib/backend/api";
 import { uuid } from "@/lib/common/utils";
-import { addPluginDockEntry } from "@/lib/plugins/pluginBottomDock";
+import { activatePluginDockEntry, addPluginDockEntry, findReusableDockEntry } from "@/lib/plugins/pluginBottomDock";
 import { createFrontendPluginRegistry, evaluatePluginCommandConditions, type FrontendPluginRegistry } from "@/lib/plugins/frontendPlugin";
 import { useQueryStore } from "@/stores/queryStore";
 import type { PluginCommandContribution, PluginConditionContextKeys } from "@/types/database";
@@ -47,11 +47,23 @@ export function executePluginCommand(registry: FrontendPluginRegistry, queryStor
   // presentation: panel -> adds an entry to the global bottom dock (§8.3); tab (default)
   // -> opens a workbench tab.
   if (action.presentation === "panel") {
+    // §4.1: singleton (default) re-activates the existing panel instance
+    // (reuse key = pluginId + commandId + presentation + instance_key);
+    // reuse:"new" always spawns one. The dock "+" menu bypasses this path by
+    // design — it is the explicit multi-open affordance.
+    if (action.reuse !== "new") {
+      const existing = findReusableDockEntry(pluginId, command.id, action.instance_key);
+      if (existing) {
+        activatePluginDockEntry(existing.id);
+        return {};
+      }
+    }
     addPluginDockEntry({
       pluginId,
       workbenchContributionId: action.workbench,
       kind: "command",
       commandId: command.id,
+      instanceKey: action.instance_key,
       title: command.label,
       icon: command.icon,
       commandContext: action.context ?? {},

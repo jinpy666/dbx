@@ -16,6 +16,8 @@ export interface PluginDockEntry {
   kind: "command" | "connection";
   /** Source command short id (present for kind=command), replayed by the generic "+". */
   commandId?: string;
+  /** §4.1 instance_key of the source command; groups the entry into the command's singleton reuse key. */
+  instanceKey?: string;
   title: string;
   icon?: string;
   /** Host-authored context: workbenchId=id, restored=false, surface="panel". */
@@ -32,6 +34,8 @@ export interface AddPluginDockEntryPayload {
   workbenchContributionId: string;
   kind: PluginDockEntry["kind"];
   commandId?: string;
+  /** §4.1 instance_key of the source command. */
+  instanceKey?: string;
   title: string;
   icon?: string;
   commandContext?: Record<string, unknown>;
@@ -57,6 +61,7 @@ export function addPluginDockEntry(payload: AddPluginDockEntryPayload): string {
     workbenchContributionId: payload.workbenchContributionId,
     kind: payload.kind,
     commandId: payload.commandId,
+    instanceKey: payload.instanceKey,
     title,
     icon: payload.icon,
     context: {
@@ -69,6 +74,17 @@ export function addPluginDockEntry(payload: AddPluginDockEntryPayload): string {
   activeEntryId.value = id;
   dockVisible.value = true;
   return id;
+}
+
+/**
+ * Singleton reuse lookup for command executions (§4.1): the reuse key is
+ * pluginId + commandId + presentation + instance_key, and the presentation is
+ * fixed to "panel" here — dock entries and workbench tabs never reuse across
+ * surfaces. Dock "+"-menu entries (kind "connection") are deliberate
+ * multi-open instances and are never reuse candidates.
+ */
+export function findReusableDockEntry(pluginId: string, commandId: string, instanceKey?: string): PluginDockEntry | undefined {
+  return dockEntries.value.find((entry) => entry.kind === "command" && entry.pluginId === pluginId && entry.commandId === commandId && (entry.instanceKey ?? undefined) === (instanceKey ?? undefined));
 }
 
 export function activatePluginDockEntry(id: string): void {

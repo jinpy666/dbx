@@ -86,11 +86,11 @@ describe("plugin command registry (PR-A4)", () => {
     expect(usePluginBottomDock().visible.value).toBe(false);
   });
 
-  it("adds a dock terminal entry per panel execution with host-authored identity", () => {
+  it("singleton (default) reuses the dock entry per panel execution; the + menu stays the multi-open affordance", () => {
     const registry = createFrontendPluginRegistry([
       installedPlugin("io.dbx.ssh", [
         { type: "workbench", id: "io.dbx.ssh.workbench", label: "SSH" },
-        localTerminalCommand({ presentation: "panel", context: { plugin: { mode: "local-terminal" }, workbenchId: "plugin-forged", surface: "tab" } }),
+        localTerminalCommand({ presentation: "panel", instance_key: "local-terminal", context: { plugin: { mode: "local-terminal" }, workbenchId: "plugin-forged", surface: "tab" } }),
       ] as unknown as InstalledPlugin["manifest"]["contributions"]),
     ]);
     const openPluginWorkbench = vi.fn();
@@ -110,18 +110,33 @@ describe("plugin command registry (PR-A4)", () => {
     expect(firstEntry.context.restored).toBe(false);
     expect(firstEntry.context.surface).toBe("panel");
     expect(activeEntryId.value).toBe(firstEntry.id);
+    // §4.1 reuse key = pluginId + commandId + presentation + instance_key.
+    expect(firstEntry.instanceKey).toBe("local-terminal");
 
-    // a second execution adds another terminal entry (VS Code "+" semantics) without overwriting.
+    // a second singleton execution re-activates the existing instance instead of spawning one;
+    // repeated multi-open goes through the dock "+" menu (options_action/connection targets), not here.
     executePluginCommand(registry, { openPluginWorkbench } as never, "io.dbx.ssh", "open-local-terminal");
-    expect(entries.value).toHaveLength(2);
-    expect(entries.value[1].id).not.toBe(firstEntry.id);
-    expect(activeEntryId.value).toBe(entries.value[1].id);
+    expect(entries.value).toHaveLength(1);
+    expect(activeEntryId.value).toBe(firstEntry.id);
     expect(openPluginWorkbench).not.toHaveBeenCalled();
 
     // closing an entry removes its tab; the panel hides once all entries are gone.
-    closePluginDockEntry(entries.value[1].id);
     closePluginDockEntry(entries.value[0].id);
     expect(visible.value).toBe(false);
+  });
+
+  it("reuse:new spawns one dock entry per execution", () => {
+    const registry = createFrontendPluginRegistry([
+      installedPlugin("io.dbx.ssh", [
+        { type: "workbench", id: "io.dbx.ssh.workbench", label: "SSH" },
+        localTerminalCommand({ presentation: "panel", reuse: "new", instance_key: "local-terminal", context: { plugin: { mode: "local-terminal" } } }),
+      ] as unknown as InstalledPlugin["manifest"]["contributions"]),
+    ]);
+    const { entries, activeEntryId } = usePluginBottomDock();
+    executePluginCommand(registry, { openPluginWorkbench: vi.fn() } as never, "io.dbx.ssh", "open-local-terminal");
+    executePluginCommand(registry, { openPluginWorkbench: vi.fn() } as never, "io.dbx.ssh", "open-local-terminal");
+    expect(entries.value).toHaveLength(2);
+    expect(activeEntryId.value).toBe(entries.value[1]!.id);
   });
 
   it("drops plugin-forged reserved fields and honors reuse:new with forceNew", () => {

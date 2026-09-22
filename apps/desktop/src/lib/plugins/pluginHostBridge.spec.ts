@@ -1176,4 +1176,46 @@ describe("plugin SDK source", () => {
     expect(source).toContain("type === 'filedrop'");
     expect(source).toContain("type === 'dragstate'");
   });
+
+  it("sdk wires the workbench/close handshake: onClose listeners, ack and ready feature flag", () => {
+    const source = pluginSdkSource();
+    expect(source).toContain("workbench.close");
+    expect(source).toContain("onClose");
+    expect(source).toContain("type === 'workbench/close'");
+    expect(source).toContain("'workbench/close-ack'");
+  });
+
+  it("requestWorkbenchClose posts the close message and resolves true on the plugin ack", async () => {
+    const messages: any[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const bridge = new PluginHostBridge(plugin(), workbench, { workbenchId: "wb-1" }, () => target, { invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn() });
+    // The new SDK advertises the handshake on ready.
+    bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "ready", features: ["workbench.close"] } } as MessageEvent);
+
+    const pending = bridge.requestWorkbenchClose(200);
+    expect(messages.some((message) => message.type === "workbench/close" && message.workbenchId === "wb-1")).toBe(true);
+    bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "workbench/close-ack", workbenchId: "wb-1" } } as MessageEvent);
+    await expect(pending).resolves.toBe(true);
+  });
+
+  it("requestWorkbenchClose resolves false after the deadline when the plugin never acks", async () => {
+    const messages: any[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const bridge = new PluginHostBridge(plugin(), workbench, {}, () => target, { invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn() });
+    bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "ready", features: ["workbench.close"] } } as MessageEvent);
+
+    await expect(bridge.requestWorkbenchClose(5)).resolves.toBe(false);
+    // A late ack after the deadline is ignored and must not throw.
+    expect(() => bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "workbench/close-ack" } } as MessageEvent)).not.toThrow();
+  });
+
+  it("requestWorkbenchClose skips the wait for SDKs without the handshake feature", async () => {
+    const messages: any[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const bridge = new PluginHostBridge(plugin(), workbench, {}, () => target, { invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn() });
+    bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "ready" } } as MessageEvent);
+
+    await expect(bridge.requestWorkbenchClose(5000)).resolves.toBe(false);
+    expect(messages.some((message) => message.type === "workbench/close")).toBe(true);
+  });
 });

@@ -181,6 +181,27 @@ function onPanelOpenWorkbench(entry: (typeof entries.value)[number], _contributi
   activatePluginDockEntry(id);
 }
 
+// §8.3/§7.4 two-phase close: removing an entry first asks its panel webview to
+// release the workbench scope (PTY sessions, subscriptions) and waits for the
+// bridge-bounded handshake before the iframe is unmounted.
+const workbenchHosts = new Map<string, { requestClose: () => Promise<boolean> }>();
+function setWorkbenchHostRef(entryId: string) {
+  return (element: unknown) => {
+    const host = element as { requestClose: () => Promise<boolean> } | null;
+    if (host) workbenchHosts.set(entryId, host);
+    else workbenchHosts.delete(entryId);
+  };
+}
+
+async function closeEntry(entryId: string) {
+  try {
+    await workbenchHosts.get(entryId)?.requestClose();
+  } catch {
+    // Teardown proceeds regardless of a broken handshake.
+  }
+  closePluginDockEntry(entryId);
+}
+
 // Hide the panel: terminal sessions survive (VS Code semantics); the toolbar icon restores it.
 function hideDock() {
   collapsed.value = false;
@@ -249,7 +270,7 @@ onScopeDispose(() => window.removeEventListener("pointerdown", onPlusMenuOutside
         >
           <PluginIcon :plugin-id="entry.pluginId" :icon="entry.icon" class="h-3.5 w-3.5 shrink-0" />
           <span class="max-w-40 truncate">{{ entry.title }}</span>
-          <span class="ml-0.5 rounded p-0.5 opacity-0 transition-opacity hover:bg-background/80 group-hover:opacity-100" role="button" :aria-label="t('pluginDock.close')" @click.stop="closePluginDockEntry(entry.id)">
+          <span class="ml-0.5 rounded p-0.5 opacity-0 transition-opacity hover:bg-background/80 group-hover:opacity-100" role="button" :aria-label="t('pluginDock.close')" @click.stop="closeEntry(entry.id)">
             <X class="h-3 w-3" />
           </span>
         </button>
@@ -297,10 +318,11 @@ onScopeDispose(() => window.removeEventListener("pointerdown", onPlusMenuOutside
       <div v-for="entry in entries" v-show="entry.id === activeEntryId && !collapsed" :key="entry.id" class="h-full w-full">
         <PluginWorkbenchHost
           v-if="definitionFor(entry.pluginId)"
+          :ref="setWorkbenchHostRef(entry.id)"
           :plugin="definitionFor(entry.pluginId)!"
           :contribution="(definitionFor(entry.pluginId)!.manifest.contributions || []).find((candidate): candidate is PluginWorkbenchContribution => candidate.type === 'workbench' && candidate.id === entry.workbenchContributionId)!"
           :context="entry.context"
-          @close-tab="closePluginDockEntry(entry.id)"
+          @close-tab="closeEntry(entry.id)"
           @open-workbench="(_pluginId, contributionId, context) => onPanelOpenWorkbench(entry, contributionId, context)"
         />
       </div>

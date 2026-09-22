@@ -34,6 +34,19 @@ describe("pluginBottomDock", () => {
     dock.closePluginDockEntry(fourth);
   });
 
+  it("finds singleton reuse candidates only inside the same plugin+command+instance-key group (§4.1)", async () => {
+    const dock = await loadModule();
+    const first = dock.addPluginDockEntry({ pluginId: "io.dbx.ssh", workbenchContributionId: "local", kind: "command", commandId: "open-local-terminal", title: "Local terminal", instanceKey: "local-terminal" });
+    expect(dock.findReusableDockEntry("io.dbx.ssh", "open-local-terminal", "local-terminal")?.id).toBe(first);
+    // a different instance_key is a different singleton group.
+    expect(dock.findReusableDockEntry("io.dbx.ssh", "open-local-terminal", "other")).toBeUndefined();
+    // an undefined instance_key only matches entries created without one.
+    expect(dock.findReusableDockEntry("io.dbx.ssh", "open-local-terminal")).toBeUndefined();
+    // connection-target entries (dock "+" menu) are never command reuse candidates.
+    dock.addPluginDockEntry({ pluginId: "io.dbx.ssh", workbenchContributionId: "local", kind: "connection", commandId: "open-local-terminal", title: "Prod" });
+    expect(dock.findReusableDockEntry("io.dbx.ssh", "open-local-terminal", "local-terminal")?.id).toBe(first);
+  });
+
   it("keeps entries alive across hide/show and only clears the dock with its last entry", async () => {
     const dock = await loadModule();
     const state = dock.usePluginBottomDock();

@@ -604,9 +604,22 @@ watch(
   () => bridge?.updateTheme(currentBridgeTheme()),
 );
 
+/** §8.3/§7.4 two-phase close: parents await this before removing the entry so
+ * the plugin can release its workbench scope (PTY sessions, subscriptions);
+ * the bridge bounds the wait and resolves false on legacy/hung plugins. */
+function requestClose(): Promise<boolean> {
+  return bridge ? bridge.requestWorkbenchClose() : Promise.resolve(false);
+}
+
+defineExpose({ requestClose });
+
 onBeforeUnmount(() => {
   disposed = true;
   loadGeneration += 1;
+  // Best-effort §8.3 close notice for teardown paths that never called
+  // requestClose (tab closes, plugin reload): the message still goes out, but
+  // delivery of the plugin's cleanup is not guaranteed once the iframe dies.
+  void bridge?.requestWorkbenchClose(0).catch(() => undefined);
   bridge?.dispose();
   bridge = undefined;
   window.removeEventListener("message", onMessage);
