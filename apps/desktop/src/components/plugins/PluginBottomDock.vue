@@ -12,7 +12,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import PluginIcon from "@/components/plugins/PluginIcon.vue";
 import PluginWorkbenchHost from "@/components/plugins/PluginWorkbenchHost.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
-import { activatePluginDockEntry, addPluginDockEntry, closePluginDockEntry, setDockMaximized, setDockVisible, usePluginBottomDock } from "@/lib/plugins/pluginBottomDock";
+import { activatePluginDockEntry, addPluginDockEntry, closePluginDockEntry, DOCK_MAX_VIEWPORT_RATIO, DOCK_MIN_HEIGHT_PX, persistDockHeight, restoreDockHeight, setDockMaximized, setDockVisible, usePluginBottomDock } from "@/lib/plugins/pluginBottomDock";
 import { useDockResize } from "@/composables/useDockResize";
 import { executePluginCommand } from "@/lib/plugins/pluginCommandRegistry";
 import { createFrontendPluginRegistry } from "@/lib/plugins/frontendPlugin";
@@ -20,17 +20,14 @@ import { useQueryStore } from "@/stores/queryStore";
 import * as api from "@/lib/backend/api";
 import type { InstalledPlugin, PluginWorkbenchContribution } from "@/types/database";
 
-const DOCK_HEIGHT_PX = 320;
-const DOCK_MIN_HEIGHT_PX = 140;
-// One bound for the drag ceiling and the maximize height: a dragged dock must
-// never shrink when the maximize button is pressed.
-const DOCK_MAX_VIEWPORT_RATIO = 0.8;
-
 const { t } = useI18n();
 const queryStore = useQueryStore();
 const { entries, activeEntryId, visible, maximized } = usePluginBottomDock();
 const collapsed = ref(false);
-const dockHeight = ref(DOCK_HEIGHT_PX);
+// The dragged height persists as UI chrome (§8.4 is untouched: dock entries
+// themselves are never restored across restarts).
+const dockHeight = ref(restoreDockHeight(window.innerHeight));
+watch(dockHeight, (height) => persistDockHeight(height));
 const plugins = ref<InstalledPlugin[]>([]);
 
 const activeEntry = computed(() => entries.value.find((entry) => entry.id === activeEntryId.value) ?? null);

@@ -7,6 +7,13 @@
 // presentation: dock (panel) instances and tab instances coexist.
 import { ref } from "vue";
 import { uuid } from "@/lib/common/utils";
+import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
+
+export const DOCK_HEIGHT_PX = 320;
+export const DOCK_MIN_HEIGHT_PX = 140;
+/** One bound for the drag ceiling and the maximize height: a dragged dock must never shrink when the maximize button is pressed. */
+export const DOCK_MAX_VIEWPORT_RATIO = 0.8;
+const DOCK_HEIGHT_STORAGE_KEY = "dbx-plugin-dock-height";
 
 export interface PluginDockEntry {
   /** Host-generated stable instance id; doubles as the entry workbench's workbenchId. */
@@ -118,4 +125,21 @@ export function setDockMaximized(maximized: boolean): void {
 
 export function usePluginBottomDock() {
   return { entries: dockEntries, activeEntryId, visible: dockVisible, maximized: dockMaximized };
+}
+
+/**
+ * UI-chrome persistence only: the dragged dock height survives restarts. Dock
+ * entries themselves are never persisted or restored (§8.4 restore:"none" —
+ * no shell may come back with the app). The stored height is clamped to the
+ * current viewport, so a smaller window cannot inherit an oversized dock.
+ */
+export function restoreDockHeight(viewportHeight: number): number {
+  const stored = Number(safeLocalStorageGet(DOCK_HEIGHT_STORAGE_KEY));
+  if (!Number.isFinite(stored) || stored <= 0) return DOCK_HEIGHT_PX;
+  const max = Math.max(DOCK_MIN_HEIGHT_PX, Math.floor(viewportHeight * DOCK_MAX_VIEWPORT_RATIO));
+  return Math.min(Math.max(stored, DOCK_MIN_HEIGHT_PX), max);
+}
+
+export function persistDockHeight(height: number): void {
+  safeLocalStorageSet(DOCK_HEIGHT_STORAGE_KEY, String(Math.round(height)));
 }
