@@ -45,6 +45,7 @@ const APP_STATE_TRANSFER_TASK_LIBRARY_KEY: &str = "transfer_task_library";
 const MCP_GLOBAL_POLICY_KEY: &str = "mcp_global_policy";
 const MCP_HTTP_SERVER_SETTINGS_KEY: &str = "mcp_http_server_settings";
 const MAX_RETRIES_KEY: &str = "max_retries";
+const HISTORY_RETENTION_LIMIT_KEY: &str = "history_retention_limit";
 const SQL_FILE_UPLOAD_MAX_MB_KEY: &str = "sql_file_upload_max_mb";
 const APP_STATE_AI_GLOBAL_INSTRUCTIONS_KEY: &str = "ai_global_custom_instructions";
 const APP_STATE_AI_CHAT_SELECTION_KEY: &str = "ai_chat_selection_v1";
@@ -231,6 +232,10 @@ pub struct DesktopSettings {
     pub plugin_store_dir: Option<String>,
     #[serde(default)]
     pub agent_store_dir: Option<String>,
+    #[serde(default)]
+    pub custom_ai_skill_root_enabled: bool,
+    #[serde(default)]
+    pub custom_ai_skill_root: Option<String>,
     #[serde(default = "default_sidebar_table_page_size")]
     pub sidebar_table_page_size: usize,
 }
@@ -683,6 +688,8 @@ impl Default for DesktopSettings {
             driver_store_dir: None,
             plugin_store_dir: None,
             agent_store_dir: None,
+            custom_ai_skill_root_enabled: false,
+            custom_ai_skill_root: None,
             sidebar_table_page_size: default_sidebar_table_page_size(),
         }
     }
@@ -751,6 +758,7 @@ const SCHEMA_STATEMENTS: &[&str] = &[
         database TEXT NOT NULL DEFAULT '',
         messages_json TEXT NOT NULL DEFAULT '[]',
         queued_input TEXT,
+        plugin_context_json TEXT,
         created_at TEXT NOT NULL DEFAULT '',
         updated_at TEXT NOT NULL DEFAULT ''
     )",
@@ -1216,10 +1224,9 @@ fn ensure_ai_configs_columns_sync(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-/// Adds the queued-input column to `ai_conversations` for databases created
-/// by earlier iterations of the uncommitted WIP, where the table predates it.
+/// Adds conversation metadata columns to databases created before these fields.
 fn ensure_ai_conversations_columns_sync(conn: &Connection) -> Result<(), String> {
-    const COLUMNS: &[(&str, &str)] = &[("queued_input", "TEXT")];
+    const COLUMNS: &[(&str, &str)] = &[("queued_input", "TEXT"), ("plugin_context_json", "TEXT")];
 
     ensure_table_columns(conn, "ai_conversations", COLUMNS)
 }
@@ -1516,11 +1523,36 @@ fn map_history_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HistoryEntry> {
     })
 }
 
+fn history_retention_limit_from_settings(settings: &serde_json::Map<String, serde_json::Value>) -> u32 {
+    settings
+        .get(HISTORY_RETENTION_LIMIT_KEY)
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .filter(|value| crate::history::validate_history_retention_limit(*value).is_ok())
+        .unwrap_or(MAX_HISTORY as u32)
+}
+
+fn load_history_retention_limit_from_conn(conn: &Connection) -> Result<u32, String> {
+    let current: Option<String> = conn
+        .query_row("SELECT settings_json FROM app_settings WHERE id = 1", [], |row| row.get(0))
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let settings = match current {
+        Some(json) => serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json)
+            .map_err(|e| format!("invalid app settings JSON: {e}"))?,
+        None => serde_json::Map::new(),
+    };
+    Ok(history_retention_limit_from_settings(&settings))
+}
+
 impl Storage {
     pub async fn save_history_entry(&self, entry: &HistoryEntry) -> Result<(), String> {
         let entry = entry.clone();
         self.with_conn(move |conn| {
-            conn.execute(
+            let tx =
+                conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|e| e.to_string())?;
+            let limit = load_history_retention_limit_from_conn(&tx)?;
+            tx.execute(
                 "INSERT OR REPLACE INTO history \
                  (id, connection_name, database, sql_text, executed_at, execution_time_ms, success, error, \
                   activity_kind, connection_id, operation, target, affected_rows, rollback_sql, details_json) \
@@ -1545,13 +1577,15 @@ impl Storage {
             )
             .map_err(|e| e.to_string())?;
 
-            conn.execute(
-                "DELETE FROM history WHERE id NOT IN \
-                 (SELECT id FROM history ORDER BY executed_at DESC LIMIT ?1)",
-                [MAX_HISTORY as i64],
-            )
-            .map_err(|e| e.to_string())?;
-            Ok(())
+            if limit != 0 {
+                tx.execute(
+                    "DELETE FROM history WHERE id NOT IN \
+                     (SELECT id FROM history ORDER BY executed_at DESC, id DESC LIMIT ?1)",
+                    [i64::from(limit)],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            tx.commit().map_err(|e| e.to_string())
         })
         .await
     }
@@ -2071,7 +2105,8 @@ impl Storage {
                 .query_row("SELECT settings_json FROM app_settings WHERE id = 1", [], |row| row.get(0))
                 .optional()
                 .map_err(|e| e.to_string())?;
-            let dedicated_keys = [MCP_GLOBAL_POLICY_KEY, MAX_RETRIES_KEY, SQL_FILE_UPLOAD_MAX_MB_KEY];
+            let dedicated_keys =
+                [MCP_GLOBAL_POLICY_KEY, MAX_RETRIES_KEY, SQL_FILE_UPLOAD_MAX_MB_KEY, HISTORY_RETENTION_LIMIT_KEY];
             for key in dedicated_keys {
                 settings.remove(key);
             }
@@ -2263,6 +2298,18 @@ impl Storage {
             }
         }
         settings.insert(
+            "custom_ai_skill_root_enabled".to_string(),
+            serde_json::Value::Bool(desktop_settings.custom_ai_skill_root_enabled),
+        );
+        match desktop_settings.custom_ai_skill_root.as_ref().filter(|path| !path.trim().is_empty()) {
+            Some(path) => {
+                settings.insert("custom_ai_skill_root".to_string(), serde_json::Value::String(path.clone()));
+            }
+            None => {
+                settings.remove("custom_ai_skill_root");
+            }
+        }
+        settings.insert(
             "sidebar_table_page_size".to_string(),
             serde_json::Value::Number(serde_json::Number::from(desktop_settings.sidebar_table_page_size)),
         );
@@ -2326,6 +2373,16 @@ impl Storage {
                 .map(ToString::to_string),
             agent_store_dir: settings
                 .get("agent_store_dir")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
+            custom_ai_skill_root_enabled: settings
+                .get("custom_ai_skill_root_enabled")
+                .and_then(|value| value.as_bool())
+                .unwrap_or_else(|| DesktopSettings::default().custom_ai_skill_root_enabled),
+            custom_ai_skill_root: settings
+                .get("custom_ai_skill_root")
                 .and_then(|value| value.as_str())
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
@@ -2654,6 +2711,33 @@ impl Storage {
             .unwrap_or(crate::agent_loop::DEFAULT_MAX_AGENT_TURNS))
     }
 
+    pub async fn load_history_retention_limit(&self) -> Result<u32, String> {
+        self.with_conn(|conn| load_history_retention_limit_from_conn(conn)).await
+    }
+
+    pub async fn save_history_retention_limit(&self, limit: u32) -> Result<(), String> {
+        crate::history::validate_history_retention_limit(limit)?;
+        self.with_conn(move |conn| {
+            let current: Option<String> = conn
+                .query_row("SELECT settings_json FROM app_settings WHERE id = 1", [], |row| row.get(0))
+                .optional()
+                .map_err(|e| e.to_string())?;
+            let mut settings = match current {
+                Some(json) => serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json)
+                    .map_err(|e| format!("invalid app settings JSON: {e}"))?,
+                None => serde_json::Map::new(),
+            };
+            settings.insert(HISTORY_RETENTION_LIMIT_KEY.to_string(), serde_json::Value::from(limit));
+            conn.execute(
+                "INSERT OR REPLACE INTO app_settings (id, settings_json) VALUES (1, ?1)",
+                [serde_json::Value::Object(settings).to_string()],
+            )
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
     pub async fn save_max_retries(&self, max_retries: u32) -> Result<(), String> {
         let max_retries = crate::ai::clamp_max_retries(max_retries);
         self.with_conn(move |conn| {
@@ -2799,8 +2883,8 @@ impl Storage {
             let tx = conn.transaction().map_err(|e| e.to_string())?;
             tx.execute(
                 "INSERT INTO ai_conversations \
-                 (id, title, connection_name, database, messages_json, queued_input, created_at, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+                 (id, title, connection_name, database, messages_json, queued_input, created_at, updated_at, plugin_context_json) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT(id) DO UPDATE SET \
                    title = excluded.title, \
                    connection_name = excluded.connection_name, \
@@ -2808,7 +2892,7 @@ impl Storage {
                    messages_json = excluded.messages_json, \
                    queued_input = excluded.queued_input, \
                    created_at = excluded.created_at, \
-                   updated_at = excluded.updated_at",
+                   updated_at = excluded.updated_at, plugin_context_json = excluded.plugin_context_json",
                 params![
                     conv.id,
                     conv.title,
@@ -2817,7 +2901,8 @@ impl Storage {
                     messages_json,
                     conv.queued_input,
                     conv.created_at,
-                    conv.updated_at
+                    conv.updated_at,
+                    conv.plugin_context.map(|value| value.to_string())
                 ],
             )
             .map_err(|e| e.to_string())?;
@@ -2832,7 +2917,7 @@ impl Storage {
         self.with_conn(|conn| {
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, title, connection_name, database, messages_json, queued_input, created_at, updated_at \
+                    "SELECT id, title, connection_name, database, messages_json, queued_input, created_at, updated_at, plugin_context_json \
                      FROM ai_conversations ORDER BY updated_at DESC",
                 )
                 .map_err(|e| e.to_string())?;
@@ -2850,6 +2935,7 @@ impl Storage {
                         queued_input: row.get(5)?,
                         created_at: row.get(6)?,
                         updated_at: row.get(7)?,
+                        plugin_context: row.get::<_, Option<String>>(8)?.map(|json| serde_json::from_str(&json)).transpose().map_err(map_from_sql_err)?,
                     })
                 })
                 .map_err(|e| e.to_string())?;
@@ -2916,8 +3002,8 @@ impl Storage {
             let tx = conn.transaction().map_err(|e| e.to_string())?;
             tx.execute(
                 "INSERT INTO ai_conversations
-                 (id, title, connection_name, database, messages_json, queued_input, created_at, updated_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 (id, title, connection_name, database, messages_json, queued_input, created_at, updated_at, plugin_context_json)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT(id) DO UPDATE SET
                    title = excluded.title,
                    connection_name = excluded.connection_name,
@@ -2925,7 +3011,7 @@ impl Storage {
                    messages_json = excluded.messages_json,
                    queued_input = excluded.queued_input,
                    created_at = excluded.created_at,
-                   updated_at = excluded.updated_at",
+                   updated_at = excluded.updated_at, plugin_context_json = excluded.plugin_context_json",
                 params![
                     conv.id,
                     conv.title,
@@ -2934,7 +3020,8 @@ impl Storage {
                     messages_json,
                     conv.queued_input,
                     conv.created_at,
-                    conv.updated_at
+                    conv.updated_at,
+                    conv.plugin_context.map(|value| value.to_string())
                 ],
             )
             .map_err(|e| e.to_string())?;
@@ -5126,8 +5213,8 @@ impl Storage {
             self.with_conn(move |conn| {
                 conn.execute(
                     "INSERT OR IGNORE INTO ai_conversations \
-                     (id, title, connection_name, database, messages_json, created_at, updated_at) \
-                     VALUES (?, ?, ?, ?, ?, ?, ?)",
+                     (id, title, connection_name, database, messages_json, created_at, updated_at, plugin_context_json) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     params![
                         conv.id,
                         conv.title,
@@ -5135,7 +5222,8 @@ impl Storage {
                         conv.database,
                         messages_json,
                         conv.created_at,
-                        conv.updated_at
+                        conv.updated_at,
+                    conv.plugin_context.map(|value| value.to_string())
                     ],
                 )
                 .map(|_| ())
@@ -5641,6 +5729,7 @@ mod tests {
 
     fn ai_conversation(id: &str, updated_at: &str) -> AiConversation {
         AiConversation {
+            plugin_context: None,
             id: id.to_string(),
             title: id.to_string(),
             connection_name: "local".to_string(),
@@ -5851,6 +5940,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ai_conversation_upgrades_legacy_schema_for_plugin_context() {
+        let path = temp_db_path("ai-plugin-legacy-schema");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE ai_conversations (
+            id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', connection_name TEXT NOT NULL DEFAULT '',
+            database TEXT NOT NULL DEFAULT '', messages_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT ''
+        ); INSERT INTO ai_conversations (id, title) VALUES ('legacy', 'SQL conversation');",
+        )
+        .unwrap();
+        drop(conn);
+        let storage = Storage::open(&path).await.unwrap();
+        let mut loaded = storage.load_ai_conversations().await.unwrap();
+        assert_eq!(loaded[0].title, "SQL conversation");
+        assert!(loaded[0].plugin_context.is_none());
+        loaded[0].plugin_context = Some(serde_json::json!({"data": {"snapshotId": "s1"}}));
+        storage.save_ai_conversation(&loaded[0]).await.unwrap();
+        assert_eq!(storage.load_ai_conversations().await.unwrap()[0].plugin_context, loaded[0].plugin_context);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn ai_conversation_retains_plugin_snapshot_without_a_database() {
+        let path = temp_db_path("ai-plugin-conversation");
+        let storage = Storage::open(&path).await.unwrap();
+        let mut conversation = ai_conversation("market-analysis", "0000");
+        conversation.database.clear();
+        let snapshot = serde_json::json!({
+            "pluginId": "market-watch", "pluginName": "Market Watch", "title": "AAPL",
+            "capturedAt": "2026-09-15T08:00:00Z", "data": { "price": 100, "currency": "USD" }
+        });
+        conversation.plugin_context = Some(snapshot.clone());
+        storage.save_ai_conversation(&conversation).await.unwrap();
+        let loaded = storage.load_ai_conversations().await.unwrap();
+        assert_eq!(loaded[0].plugin_context, Some(snapshot.clone()));
+        assert!(loaded[0].database.is_empty());
+        // Existing database conversations remain compatible with the optional field.
+        let mut legacy_json = serde_json::to_value(&conversation).unwrap();
+        legacy_json.as_object_mut().unwrap().remove("pluginContext");
+        let legacy: AiConversation = serde_json::from_value(legacy_json).unwrap();
+        assert!(legacy.plugin_context.is_none());
+        // A first turn recovered from the desktop FIFO has no sent messages yet.
+        conversation.messages.clear();
+        let mut run = ai_run("queued-plugin", &conversation.id, AiRunStatus::PendingRecoverable, "0001");
+        run.pending_input = Some("analyse this snapshot".to_string());
+        storage.save_ai_run_state(&conversation, &run).await.unwrap();
+        let loaded = storage.load_ai_conversations().await.unwrap();
+        assert!(loaded[0].messages.is_empty());
+        assert_eq!(loaded[0].plugin_context, Some(snapshot));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
     async fn ai_conversation_roundtrips_queued_input() {
         let path = temp_db_path("ai-conversation-queued-input-roundtrip");
         let storage = Storage::open(&path).await.unwrap();
@@ -5871,6 +6014,147 @@ mod tests {
         assert!(loaded[0].queued_input.is_none());
 
         let _ = std::fs::remove_file(path);
+    }
+
+    // Seed a backlog efficiently, then exercise the production write path that
+    // applies retention. Settings must affect every caller of that path.
+    async fn seed_history_backlog(storage: &Storage, count: usize) {
+        storage.with_conn(move |conn| {
+            let tx = conn.transaction().map_err(|error| error.to_string())?;
+            for index in 0..count {
+                tx.execute(
+                    "INSERT INTO history (id, connection_name, database, sql_text, executed_at, execution_time_ms, success) VALUES (?1, 'Main', 'app', 'select 1', '2026-07-18T12:00:00Z', 1, 1)",
+                    [format!("{index:05}")],
+                ).map_err(|error| error.to_string())?;
+            }
+            tx.commit().map_err(|error| error.to_string())
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn history_retention_uses_persisted_limit_on_the_next_write() {
+        for (limit, expected) in [(200, 200), (5000, 1002), (10000, 1002), (0, 1002)] {
+            let dir = tempfile::tempdir().unwrap();
+            let storage = Storage::open(&dir.path().join("dbx.db")).await.unwrap();
+            seed_history_backlog(&storage, 1001).await;
+            storage
+                .with_conn(move |conn| {
+                    conn.execute(
+                        "INSERT OR REPLACE INTO app_settings (id, settings_json) VALUES (1, ?1)",
+                        [serde_json::json!({"history_retention_limit": limit}).to_string()],
+                    )
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+                })
+                .await
+                .unwrap();
+            // Changing the setting alone must not evict existing history.
+            assert_eq!(storage.search_history_entries(HistorySearchRequest::default()).await.unwrap().total, 1001);
+            storage
+                .save_history_entry(&history_entry(
+                    "newest",
+                    "conn",
+                    "Main",
+                    "app",
+                    "select 2",
+                    "2026-07-19T00:00:00Z",
+                    true,
+                ))
+                .await
+                .unwrap();
+            let result = storage.search_history_entries(HistorySearchRequest::default()).await.unwrap();
+            assert_eq!(result.total, expected, "retention limit {limit}");
+            assert_eq!(result.entries[0].id, "newest");
+            if limit == 200 {
+                let remaining = storage.load_history_entries(500, 0, None).await.unwrap();
+                assert!(remaining.iter().all(|entry| entry.id == "newest" || entry.id.as_str() >= "00802"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn history_retention_defaults_validates_and_survives_stale_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dbx.db");
+        let storage = Storage::open(&path).await.unwrap();
+        assert_eq!(storage.load_history_retention_limit().await.unwrap(), 1000);
+        let stale = storage.load_app_settings_json().await.unwrap();
+        for limit in [200, 1000, 5000, 10000, 0] {
+            storage.save_history_retention_limit(limit).await.unwrap();
+            assert_eq!(storage.load_history_retention_limit().await.unwrap(), limit);
+        }
+        for invalid in [1, 199, 201, 10001, u32::MAX] {
+            assert!(storage.save_history_retention_limit(invalid).await.is_err());
+            assert_eq!(storage.load_history_retention_limit().await.unwrap(), 0);
+        }
+        storage.save_app_settings_json(&stale).await.unwrap();
+        assert_eq!(storage.load_history_retention_limit().await.unwrap(), 0);
+        drop(storage);
+        let reopened = Storage::open(&path).await.unwrap();
+        assert_eq!(reopened.load_history_retention_limit().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn history_retention_invalid_persisted_values_use_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&dir.path().join("dbx.db")).await.unwrap();
+        for value in [
+            serde_json::json!(-1),
+            serde_json::json!(1),
+            serde_json::json!("200"),
+            serde_json::json!(u64::MAX),
+            serde_json::Value::Null,
+        ] {
+            storage
+                .with_conn(move |conn| {
+                    conn.execute(
+                        "INSERT OR REPLACE INTO app_settings (id, settings_json) VALUES (1, ?1)",
+                        [serde_json::json!({"history_retention_limit": value}).to_string()],
+                    )
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+                })
+                .await
+                .unwrap();
+            assert_eq!(storage.load_history_retention_limit().await.unwrap(), 1000);
+        }
+        seed_history_backlog(&storage, 1001).await;
+        storage
+            .save_history_entry(&history_entry(
+                "newest",
+                "conn",
+                "Main",
+                "app",
+                "select 2",
+                "2026-07-19T00:00:00Z",
+                true,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(storage.search_history_entries(HistorySearchRequest::default()).await.unwrap().total, 1000);
+    }
+
+    #[tokio::test]
+    async fn history_retention_setting_changes_do_not_prune_until_next_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&dir.path().join("dbx.db")).await.unwrap();
+        storage.save_history_retention_limit(0).await.unwrap();
+        seed_history_backlog(&storage, 1001).await;
+        storage.save_history_retention_limit(200).await.unwrap();
+        assert_eq!(storage.search_history_entries(HistorySearchRequest::default()).await.unwrap().total, 1001);
+        storage
+            .save_history_entry(&history_entry(
+                "newest",
+                "conn",
+                "Main",
+                "app",
+                "select 2",
+                "2026-07-19T00:00:00Z",
+                true,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(storage.search_history_entries(HistorySearchRequest::default()).await.unwrap().total, 200);
     }
 
     #[tokio::test]
@@ -7572,6 +7856,8 @@ mod tests {
                 driver_store_dir: Some("/tmp/dbx-drivers".to_string()),
                 plugin_store_dir: Some("/tmp/dbx-plugins".to_string()),
                 agent_store_dir: Some("/tmp/dbx-agents".to_string()),
+                custom_ai_skill_root_enabled: DesktopSettings::default().custom_ai_skill_root_enabled,
+                custom_ai_skill_root: None,
                 sidebar_table_page_size: DesktopSettings::default().sidebar_table_page_size,
             })
             .await
@@ -7593,9 +7879,51 @@ mod tests {
                 driver_store_dir: Some("/tmp/dbx-drivers".to_string()),
                 plugin_store_dir: Some("/tmp/dbx-plugins".to_string()),
                 agent_store_dir: Some("/tmp/dbx-agents".to_string()),
+                custom_ai_skill_root_enabled: DesktopSettings::default().custom_ai_skill_root_enabled,
+                custom_ai_skill_root: None,
                 sidebar_table_page_size: DesktopSettings::default().sidebar_table_page_size,
             }
         );
+    }
+
+    #[tokio::test]
+    async fn desktop_settings_roundtrip_custom_ai_skill_root() {
+        let path = temp_db_path("desktop-settings-custom-ai-skill-root");
+        let storage = Storage::open(&path).await.unwrap();
+
+        storage
+            .save_desktop_settings(&DesktopSettings {
+                custom_ai_skill_root_enabled: true,
+                custom_ai_skill_root: Some("/tmp/dbx-skills".to_string()),
+                ..DesktopSettings::default()
+            })
+            .await
+            .unwrap();
+
+        let settings = storage.load_desktop_settings().await.unwrap();
+        assert!(settings.custom_ai_skill_root_enabled);
+        assert_eq!(settings.custom_ai_skill_root.as_deref(), Some("/tmp/dbx-skills"));
+
+        let raw = storage.load_app_settings_json().await.unwrap();
+        assert_eq!(raw.get("custom_ai_skill_root_enabled").and_then(|value| value.as_bool()), Some(true));
+        assert_eq!(raw.get("custom_ai_skill_root").and_then(|value| value.as_str()), Some("/tmp/dbx-skills"));
+
+        storage
+            .save_desktop_settings(&DesktopSettings {
+                custom_ai_skill_root_enabled: false,
+                custom_ai_skill_root: Some("   ".to_string()),
+                ..DesktopSettings::default()
+            })
+            .await
+            .unwrap();
+
+        let settings = storage.load_desktop_settings().await.unwrap();
+        assert!(!settings.custom_ai_skill_root_enabled);
+        assert_eq!(settings.custom_ai_skill_root, None);
+
+        let raw = storage.load_app_settings_json().await.unwrap();
+        assert_eq!(raw.get("custom_ai_skill_root_enabled").and_then(|value| value.as_bool()), Some(false));
+        assert_eq!(raw.get("custom_ai_skill_root"), None);
     }
 
     #[tokio::test]

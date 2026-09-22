@@ -389,6 +389,7 @@ async fn main() {
         .route("/connection/final-proxy-port", post(routes::connection::connection_final_proxy_port))
         .route("/connection/disconnect", post(routes::connection::disconnect_db))
         .route("/connection/check-health", post(routes::connection::check_connection_health))
+        .route("/connection/prewarm", post(routes::connection::prewarm_connection))
         .route("/connection/session-credential-status", post(routes::connection::session_credential_status))
         .route("/connection/forget-session-credential", post(routes::connection::forget_session_credential))
         .route(
@@ -1139,6 +1140,11 @@ async fn main() {
         .route(
             "/app-settings/max-agent-turns",
             get(routes::app_settings::load_max_agent_turns).put(routes::app_settings::save_max_agent_turns),
+        )
+        .route(
+            "/app-settings/history-retention-limit",
+            get(routes::app_settings::load_history_retention_limit)
+                .put(routes::app_settings::save_history_retention_limit),
         )
         .route(
             "/app-settings/max-retries",

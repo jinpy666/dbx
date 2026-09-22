@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { HISTORY_RETENTION_LIMITS, useHistoryRetentionSetting } from "@/composables/useHistoryRetentionSetting";
 import { ref, watch, shallowRef, computed, onMounted, onUnmounted, nextTick } from "vue";
 import type { Ref } from "vue";
 import type { EditorView as EditorViewType } from "@codemirror/view";
@@ -17,6 +18,7 @@ import {
   Copy,
   Download,
   ExternalLink,
+  FolderOpen,
   Eye,
   Filter,
   Globe,
@@ -280,6 +282,7 @@ import { buildFontFamilyOptions, displayFontFamily, isPresetFontFamily, loadSyst
 import { buildAppSupportInfoRows, formatAppSupportInfoForClipboard, type AppSupportInfoLabels } from "@/lib/app/supportInfo";
 import { useUiFontFamilyPreview } from "@/composables/useUiFontFamilyPreview";
 import { useMeasuredWidth } from "@/composables/useMeasuredWidth";
+import { createDelayedPreview } from "@/lib/common/delayedPreview";
 import { DateTimePatterns, normalizeSupportedDateTimePattern } from "@/lib/dataGrid/columnFormatter";
 import { MAX_RESULT_PAGE_SIZE, MIN_RESULT_PAGE_SIZE } from "@/lib/dataGrid/paginationPageSize";
 import { MAX_QUERY_RESULT_MAX_ROWS } from "@/lib/dataGrid/queryResultRowLimit";
@@ -293,6 +296,8 @@ import { buildConnectionGroupIdPathMap, connectionGroupDestinationRows, connecti
 const { t, locale } = useI18n();
 const { toast } = useToast();
 const settingsStore = useSettingsStore();
+const historyRetention = useHistoryRetentionSetting();
+const { draft: editHistoryRetentionLimit, loaded: historyRetentionLoaded, loading: historyRetentionLoading, saving: historyRetentionSaving, loadError: historyRetentionLoadError } = historyRetention;
 const connectionStore = useConnectionStore();
 const hasSqlServerConnection = computed(() => connectionStore.connections.some((connection) => effectiveDatabaseTypeForConnection(connection) === "sqlserver"));
 const savedSqlStore = useSavedSqlStore();
@@ -300,25 +305,54 @@ const promptTemplateStore = usePromptTemplateStore();
 const tunnelProfileStore = useTunnelProfileStore();
 const { isDark, themeMode, themePalette, activeCustomUiColors, cornerStyle, setThemeMode, setThemePalette, previewThemePalette, clearThemePalettePreview, setCustomUiColors, resetCustomUiColors, setCornerStyle } = useTheme();
 const { previewUiFontFamily, clearUiFontFamilyPreview } = useUiFontFamilyPreview();
+const APPEARANCE_POINTER_PREVIEW_DELAY_MS = 80;
+const themePaletteOptionPreview = createDelayedPreview<AppThemePalette>(previewThemePalette, APPEARANCE_POINTER_PREVIEW_DELAY_MS);
+const uiFontOptionPreview = createDelayedPreview<string>(previewUiFontFamily, APPEARANCE_POINTER_PREVIEW_DELAY_MS);
+const localeOptionPreview = createDelayedPreview<Locale>((value) => void previewLocale(value), APPEARANCE_POINTER_PREVIEW_DELAY_MS);
 
 function updateCustomUiColor(key: keyof AppCustomUiColors, value: string) {
   setCustomUiColors({ ...activeCustomUiColors.value, [key]: value });
 }
 
 function onThemePaletteSelect(value: unknown) {
-  if (typeof value === "string") setThemePalette(value as AppThemePalette);
+  if (typeof value !== "string") return;
+  themePaletteOptionPreview.cancel();
+  setThemePalette(value as AppThemePalette);
 }
 
 function onThemePaletteOpenChange(open: boolean) {
-  if (!open) clearThemePalettePreview();
+  if (!open) clearThemePaletteOptionPreview();
+}
+
+function scheduleThemePalettePreview(value: AppThemePalette) {
+  themePaletteOptionPreview.schedule(value);
+}
+
+function previewThemePaletteOption(value: AppThemePalette) {
+  themePaletteOptionPreview.runNow(value);
+}
+
+function clearThemePaletteOptionPreview() {
+  themePaletteOptionPreview.cancel();
+  clearThemePalettePreview();
+}
+
+function scheduleUiFontOptionPreview(value: string) {
+  uiFontOptionPreview.schedule(value);
 }
 
 function previewUiFontOption(value: string | undefined) {
-  if (value) previewUiFontFamily(value);
+  if (value) uiFontOptionPreview.runNow(value);
 }
 
 function restoreUiFontFamilyPreview() {
+  uiFontOptionPreview.cancel();
   previewUiFontFamily(editUiFontFamily.value);
+}
+
+function clearUiFontOptionPreview() {
+  uiFontOptionPreview.cancel();
+  clearUiFontFamilyPreview();
 }
 
 function onUiFontFamilyOpenChange(open: boolean) {
@@ -330,10 +364,15 @@ function onUiFontFamilyOpenChange(open: boolean) {
 }
 
 function previewLocaleOption(locale: Locale) {
-  void previewLocale(locale);
+  localeOptionPreview.runNow(locale);
+}
+
+function scheduleLocaleOptionPreview(locale: Locale) {
+  localeOptionPreview.schedule(locale);
 }
 
 function restoreLocaleOptionPreview() {
+  localeOptionPreview.cancel();
   void restoreLocalePreview();
 }
 
@@ -558,6 +597,7 @@ const showThemeCustomizer = ref(false);
 const showDataGridTypeColorScheme = ref(false);
 const editExecuteMode = ref(settingsStore.editorSettings.executeMode);
 const editDefaultTransactionMode = ref(settingsStore.editorSettings.defaultTransactionMode);
+const editKeepExplicitTransactionInAutoCommit = ref(settingsStore.editorSettings.keepExplicitTransactionInAutoCommit);
 const editShortcuts = ref(normalizeShortcutSettings(settingsStore.editorSettings.shortcuts));
 function translateWithExecuteShortcut(key: string): string {
   return t(key, { shortcut: formatShortcutDisplay(editShortcuts.value.executeSql) });
@@ -926,6 +966,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     activeCustomThemeId: editActiveCustomThemeId.value,
     executeMode: editExecuteMode.value,
     defaultTransactionMode: editDefaultTransactionMode.value,
+    keepExplicitTransactionInAutoCommit: editKeepExplicitTransactionInAutoCommit.value,
     executeAllOnBlankLine: editExecuteAllOnBlankLine.value,
     showExecutionTargetPicker: editShowExecutionTargetPicker.value,
     showStatementRunButtons: editShowStatementRunButtons.value,
@@ -1567,6 +1608,7 @@ function syncEditorSettingsDraftFromStore() {
   editActiveCustomThemeId.value = settingsStore.editorSettings.activeCustomThemeId;
   editExecuteMode.value = settingsStore.editorSettings.executeMode;
   editDefaultTransactionMode.value = settingsStore.editorSettings.defaultTransactionMode;
+  editKeepExplicitTransactionInAutoCommit.value = settingsStore.editorSettings.keepExplicitTransactionInAutoCommit;
   editExecuteAllOnBlankLine.value = settingsStore.editorSettings.executeAllOnBlankLine;
   editShowExecutionTargetPicker.value = settingsStore.editorSettings.showExecutionTargetPicker;
   editShowStatementRunButtons.value = settingsStore.editorSettings.showStatementRunButtons;
@@ -1811,6 +1853,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   clickTableNavigationTarget: editClickTableNavigationTarget,
   completionTriggerMode: editCompletionTriggerMode,
   defaultTransactionMode: editDefaultTransactionMode,
+  keepExplicitTransactionInAutoCommit: editKeepExplicitTransactionInAutoCommit,
   tableColumnTemplateFields: editTableColumnTemplateRows,
 };
 
@@ -1839,6 +1882,7 @@ watch(
   (open) => {
     if (open) {
       syncEditorSettingsDraftFromStore();
+      void historyRetention.load();
       editShowTrayIcon.value = settingsStore.desktopSettings.show_tray_icon;
       editQuitOnClose.value = settingsStore.desktopSettings.quit_on_close;
       editIconTheme.value = settingsStore.desktopSettings.icon_theme;
@@ -1847,8 +1891,9 @@ watch(
       editDuckDbWorkerProcessIsolation.value = settingsStore.desktopSettings.duckdb_worker_process_isolation;
       editSidebarTablePageSize.value = settingsStore.desktopSettings.sidebar_table_page_size ?? DEFAULT_SIDEBAR_TABLE_PAGE_SIZE;
     } else {
-      clearThemePalettePreview();
-      clearUiFontFamilyPreview();
+      historyRetention.discard();
+      clearThemePaletteOptionPreview();
+      clearUiFontOptionPreview();
       restoreLocaleOptionPreview();
     }
   },
@@ -1859,8 +1904,8 @@ watch(
   () => settingsStore.settingsPageActive,
   (active) => {
     if (isSettingsPage.value && !active) {
-      clearThemePalettePreview();
-      clearUiFontFamilyPreview();
+      clearThemePaletteOptionPreview();
+      clearUiFontOptionPreview();
       restoreLocaleOptionPreview();
     }
   },
@@ -2035,10 +2080,11 @@ const hasBlockingShortcutConflicts = computed(() => {
 });
 const hasBlockingFormatterConfig = computed(() => activeSettingsTab.value === "formatter" && !sqlFormatterConfigValid.value);
 const hasBlockingQueryResultRowLimit = computed(() => editQueryResultMaxRowsEnabled.value && editQueryResultMaxRows.value < editPageSize.value);
-const hasApplyBlocker = computed(() => hasBlockingShortcutConflicts.value || hasBlockingFormatterConfig.value || hasBlockingQueryResultRowLimit.value);
+const hasApplyBlocker = computed(() => historyRetention.invalid.value || historyRetentionSaving.value || hasBlockingShortcutConflicts.value || hasBlockingFormatterConfig.value || hasBlockingQueryResultRowLimit.value);
 
 function hasChanges(): boolean {
   return (
+    historyRetention.changed.value ||
     hasImportedSettingsPendingApply.value ||
     hasEditorDraftChanges.value ||
     editShowTrayIcon.value !== settingsStore.desktopSettings.show_tray_icon ||
@@ -2054,6 +2100,7 @@ function hasChanges(): boolean {
 
 async function persistSettings() {
   if (hasApplyBlocker.value) return;
+  await historyRetention.save();
   const editorSettingsPatch = editorSettingsPatchFromDraft(currentEditorSettingsDraft(), editEditorSettingsBase.value);
   const sidebarObjectDisplayChanged = editorSettingsPatch.sidebarObjectDisplay !== undefined && editorSettingsPatch.sidebarObjectDisplay !== settingsStore.editorSettings.sidebarObjectDisplay;
   const sidebarTablePageSizeChanged = editSidebarTablePageSize.value !== (settingsStore.desktopSettings.sidebar_table_page_size ?? DEFAULT_SIDEBAR_TABLE_PAGE_SIZE);
@@ -2151,6 +2198,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editFontSize.value = DEFAULT_EDITOR_SETTINGS.fontSize;
     editExecuteMode.value = DEFAULT_EDITOR_SETTINGS.executeMode;
     editDefaultTransactionMode.value = DEFAULT_EDITOR_SETTINGS.defaultTransactionMode;
+    editKeepExplicitTransactionInAutoCommit.value = DEFAULT_EDITOR_SETTINGS.keepExplicitTransactionInAutoCommit;
     editExecuteAllOnBlankLine.value = DEFAULT_EDITOR_SETTINGS.executeAllOnBlankLine;
     editShowExecutionTargetPicker.value = DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker;
     editShowStatementRunButtons.value = DEFAULT_EDITOR_SETTINGS.showStatementRunButtons;
@@ -2230,6 +2278,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
     editSidebarCopyTableNameIncludeSchema.value = DEFAULT_EDITOR_SETTINGS.sidebarCopyTableNameIncludeSchema;
     editToolbarItems.value = { ...DEFAULT_EDITOR_SETTINGS.toolbarItems };
   } else if (tab === "data") {
+    historyRetention.reset();
     editShowColumnCommentsInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnCommentsInHeader;
     editShowColumnTypesInHeader.value = DEFAULT_EDITOR_SETTINGS.showColumnTypesInHeader;
     editDataGridShowTransposeFieldMetadata.value = DEFAULT_EDITOR_SETTINGS.dataGridShowTransposeFieldMetadata;
@@ -2287,6 +2336,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
 }
 
 function resetAllDefaults() {
+  historyRetention.reset();
   // Same contract as resetDefaultsForTab: a full reset also exits any
   // in-progress shortcut capture (#9066).
   editingShortcutId.value = null;
@@ -2300,6 +2350,7 @@ function resetAllDefaults() {
   editActiveCustomThemeId.value = DEFAULT_EDITOR_SETTINGS.activeCustomThemeId;
   editExecuteMode.value = DEFAULT_EDITOR_SETTINGS.executeMode;
   editDefaultTransactionMode.value = DEFAULT_EDITOR_SETTINGS.defaultTransactionMode;
+  editKeepExplicitTransactionInAutoCommit.value = DEFAULT_EDITOR_SETTINGS.keepExplicitTransactionInAutoCommit;
   editExecuteAllOnBlankLine.value = DEFAULT_EDITOR_SETTINGS.executeAllOnBlankLine;
   editShowExecutionTargetPicker.value = DEFAULT_EDITOR_SETTINGS.showExecutionTargetPicker;
   editShowStatementRunButtons.value = DEFAULT_EDITOR_SETTINGS.showStatementRunButtons;
@@ -2574,7 +2625,7 @@ function onTableFontFamilyChange(v: any) {
 function onUiFontFamilyChange(v: any) {
   if (typeof v === "string") {
     editUiFontFamily.value = v;
-    previewUiFontFamily(v);
+    uiFontOptionPreview.runNow(v);
   }
 }
 
@@ -2640,7 +2691,9 @@ function onDeleteConnectionTabHandlingModeChange(v: any) {
 }
 
 function onLocaleChange(v: any) {
-  if (typeof v === "string") void setLocale(v as Locale);
+  if (typeof v !== "string") return;
+  localeOptionPreview.cancel();
+  void setLocale(v as Locale);
 }
 
 function onUiScaleChange(value: unknown) {
@@ -2780,6 +2833,28 @@ function setTabSortMode(value: TabSortMode) {
 
 function setSidebarActivation(value: "single" | "double") {
   editSidebarActivation.value = value;
+}
+
+// Custom AI skill root (read-only SKILL.md discovery; desktop-only, prd 09-21-public-skill-loader).
+const customSkillRootDraft = ref("");
+watch(
+  () => settingsStore.desktopSettings.custom_ai_skill_root,
+  (value) => {
+    customSkillRootDraft.value = value ?? "";
+  },
+  { immediate: true },
+);
+async function commitCustomSkillRoot() {
+  const trimmed = customSkillRootDraft.value.trim();
+  if ((settingsStore.desktopSettings.custom_ai_skill_root ?? "") === trimmed) return;
+  await settingsStore.updateDesktopSettings({ custom_ai_skill_root: trimmed || null });
+}
+async function pickCustomSkillRoot() {
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const selected = await open({ directory: true, multiple: false, title: t("settings.aiSkillRoot") });
+  if (typeof selected !== "string" || !selected) return;
+  customSkillRootDraft.value = selected;
+  await settingsStore.updateDesktopSettings({ custom_ai_skill_root: selected });
 }
 
 const activeSettingsTab = ref("appearance");
@@ -4438,8 +4513,8 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
-  clearThemePalettePreview();
-  clearUiFontFamilyPreview();
+  clearThemePaletteOptionPreview();
+  clearUiFontOptionPreview();
   restoreLocaleOptionPreview();
   cleanupTableColumnTemplatePointerDrag();
   cleanupTruncationObservers();
@@ -6063,6 +6138,16 @@ onUnmounted(() => {
                   </Select>
                 </div>
 
+                <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2 md:col-span-2" data-editor-keep-explicit-transaction>
+                  <div class="min-w-0 space-y-1">
+                    <Label for="editor-keep-explicit-transaction">{{ t("settings.keepExplicitTransactionInAutoCommit") }}</Label>
+                    <p class="text-xs text-muted-foreground">
+                      {{ t("settings.keepExplicitTransactionInAutoCommitDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="editor-keep-explicit-transaction" v-model="editKeepExplicitTransactionInAutoCommit" class="mt-0.5 shrink-0" />
+                </div>
+
                 <div class="settings-item flex items-center justify-between gap-4 rounded-md border bg-muted/20 px-3 py-2" :class="{ 'opacity-50': editExecuteMode !== 'current' }">
                   <div class="space-y-1">
                     <Label for="editor-execute-all-on-blank-line">{{ t("settings.executeAllOnBlankLine") }}</Label>
@@ -6507,7 +6592,7 @@ onUnmounted(() => {
                       </SelectValue>
                     </SelectTrigger>
                     <SelectContent class="w-[150px]" @pointerleave="restoreLocaleOptionPreview">
-                      <SelectItem v-for="locale in LOCALE_OPTIONS" :key="locale.value" :value="locale.value" @pointerenter="previewLocaleOption(locale.value)" @focus="previewLocaleOption(locale.value)">
+                      <SelectItem v-for="locale in LOCALE_OPTIONS" :key="locale.value" :value="locale.value" @pointerenter="scheduleLocaleOptionPreview(locale.value)" @focus="previewLocaleOption(locale.value)">
                         <div class="flex items-center gap-1">
                           <span class="inline-flex h-5 w-6 shrink-0 items-center justify-center text-sm font-medium leading-none">
                             {{ locale.flag }}
@@ -6539,8 +6624,8 @@ onUnmounted(() => {
                             </span>
                           </SelectValue>
                         </SelectTrigger>
-                        <SelectContent @pointerleave="clearThemePalettePreview">
-                          <SelectItem v-for="option in appThemePaletteOptions" :key="option.value" :value="option.value" @pointerenter="previewThemePalette(option.value)" @focus="previewThemePalette(option.value)">
+                        <SelectContent @pointerleave="clearThemePaletteOptionPreview">
+                          <SelectItem v-for="option in appThemePaletteOptions" :key="option.value" :value="option.value" @pointerenter="scheduleThemePalettePreview(option.value)" @focus="previewThemePaletteOption(option.value)">
                             <div class="flex items-center gap-2">
                               <span class="h-3 w-3 rounded-full border border-border shadow-xs" :style="{ background: option.previewColor }" />
                               {{ option.label }}
@@ -6613,7 +6698,7 @@ onUnmounted(() => {
                     :content-style="{ fontFamily: editUiFontFamily || DEFAULT_UI_FONT_FAMILY }"
                     @update:model-value="onUiFontFamilyChange"
                     @update:open="onUiFontFamilyOpenChange"
-                    @option-hover="previewUiFontOption"
+                    @option-hover="scheduleUiFontOptionPreview"
                     @option-highlight="previewUiFontOption"
                     @option-leave="restoreUiFontFamilyPreview"
                   >
@@ -7424,6 +7509,21 @@ onUnmounted(() => {
 
             <!-- Data Tab -->
             <section v-else-if="activeSettingsTab === 'data'" data-settings-search-id="data" :class="['flex flex-col gap-5 py-2', settingsSearchTargetClass('data')]">
+              <div data-settings-search-id="history-retention" :class="['space-y-2', settingsSearchTargetClass('history-retention')]">
+                <Label for="history-retention-limit">{{ t("settings.historyRetentionLimit") }}</Label>
+                <p class="text-xs text-muted-foreground">{{ t("settings.historyRetentionDescription") }}</p>
+                <Select :model-value="String(editHistoryRetentionLimit)" :disabled="!historyRetentionLoaded || historyRetentionSaving" @update:model-value="(value) => (editHistoryRetentionLimit = Number(value))">
+                  <SelectTrigger id="history-retention-limit" class="w-40"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem v-for="limit in HISTORY_RETENTION_LIMITS" :key="limit" :value="String(limit)">{{ limit === 0 ? t("settings.historyRetentionUnlimited") : String(limit) }}</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p v-if="historyRetentionLoading" class="text-xs text-muted-foreground">{{ t("common.loading") }}</p>
+                <div v-if="historyRetentionLoadError" class="flex items-center gap-2 text-xs text-destructive" role="alert">
+                  <span>{{ t("settings.historyRetentionLoadFailed", { error: historyRetentionLoadError }) }}</span>
+                  <Button type="button" variant="outline" size="sm" @click="historyRetention.load">{{ t("common.retry") }}</Button>
+                </div>
+              </div>
               <div data-settings-search-id="data-grid-filter-view" :class="['overflow-hidden rounded-md border bg-muted/20', settingsSearchTargetClass('data-grid-filter-view')]">
                 <div class="space-y-3 p-3">
                   <div class="flex items-start justify-between gap-4">
@@ -8915,6 +9015,26 @@ LIMIT 100;</pre
                     </p>
                   </div>
                   <Switch id="ai-restore-last-conversation" :model-value="settingsStore.restoreLastConversation" @update:model-value="(value) => settingsStore.setRestoreLastConversation(Boolean(value))" />
+                </div>
+              </div>
+
+              <!-- Custom skill directory (list mode, global, desktop-only) -->
+              <div v-if="aiConfigListMode === 'list' && !isWeb" class="space-y-3">
+                <Separator />
+                <div class="settings-item space-y-2 rounded-md border bg-muted/20 px-3 py-2">
+                  <div class="flex items-center justify-between gap-4">
+                    <div class="space-y-1">
+                      <Label for="ai-custom-skill-root">{{ t("settings.aiSkillRoot") }}</Label>
+                      <p class="text-xs text-muted-foreground">{{ t("settings.aiSkillRootDesc") }}</p>
+                    </div>
+                    <Switch id="ai-custom-skill-root" :model-value="settingsStore.desktopSettings.custom_ai_skill_root_enabled === true" @update:model-value="(value) => settingsStore.updateDesktopSettings({ custom_ai_skill_root_enabled: Boolean(value) })" />
+                  </div>
+                  <div class="flex items-center gap-2">
+                    <Input v-model="customSkillRootDraft" :placeholder="t('settings.aiSkillRootPath')" :disabled="settingsStore.desktopSettings.custom_ai_skill_root_enabled !== true" class="h-8 flex-1 font-mono text-xs" @blur="commitCustomSkillRoot" @keydown.enter="commitCustomSkillRoot" />
+                    <Button variant="outline" size="sm" class="h-8 shrink-0 px-2" :disabled="settingsStore.desktopSettings.custom_ai_skill_root_enabled !== true" :aria-label="t('settings.aiSkillRootBrowse')" @click="pickCustomSkillRoot">
+                      <FolderOpen class="h-3.5 w-3.5" />
+                    </Button>
+                  </div>
                 </div>
               </div>
 
