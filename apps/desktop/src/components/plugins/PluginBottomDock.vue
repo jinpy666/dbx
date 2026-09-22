@@ -13,6 +13,7 @@ import PluginIcon from "@/components/plugins/PluginIcon.vue";
 import PluginWorkbenchHost from "@/components/plugins/PluginWorkbenchHost.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { activatePluginDockEntry, addPluginDockEntry, closePluginDockEntry, setDockMaximized, setDockVisible, usePluginBottomDock } from "@/lib/plugins/pluginBottomDock";
+import { useDockResize } from "@/composables/useDockResize";
 import { executePluginCommand } from "@/lib/plugins/pluginCommandRegistry";
 import { createFrontendPluginRegistry } from "@/lib/plugins/frontendPlugin";
 import { useQueryStore } from "@/stores/queryStore";
@@ -21,6 +22,9 @@ import type { InstalledPlugin, PluginWorkbenchContribution } from "@/types/datab
 
 const DOCK_HEIGHT_PX = 320;
 const DOCK_MIN_HEIGHT_PX = 140;
+// One bound for the drag ceiling and the maximize height: a dragged dock must
+// never shrink when the maximize button is pressed.
+const DOCK_MAX_VIEWPORT_RATIO = 0.8;
 
 const { t } = useI18n();
 const queryStore = useQueryStore();
@@ -38,7 +42,9 @@ const activeCommand = computed(() => {
 
 watch(entries, () => void loadPluginData(), { deep: true, immediate: true });
 watch([activeEntry, activeCommand], () => void loadLaunchOptions());
-window.addEventListener("dbx:plugins-changed", () => void loadPluginData());
+const onPluginsChanged = () => void loadPluginData();
+window.addEventListener("dbx:plugins-changed", onPluginsChanged);
+onScopeDispose(() => window.removeEventListener("dbx:plugins-changed", onPluginsChanged));
 
 async function loadPluginData() {
   if (!entries.value.length) {
@@ -182,30 +188,27 @@ function hideDock() {
   setDockVisible(false);
 }
 
-// Drag the top edge to resize the height (min 140px, up to 80% of the window).
-// Dragging always exits maximized/collapsed: the start height is the currently
-// rendered pixel height, so the transition is seamless.
+// Drag the top edge to resize the height (min 140px, up to the shared maximize
+// bound). Dragging always exits maximized/collapsed: the start height is the
+// currently rendered pixel height, so the transition is seamless. The
+// composable owns pointer capture, rAF coalescing and listener cleanup — see
+// useDockResize for why capture is load-bearing over the plugin iframes.
 const dockRoot = ref<HTMLElement>();
-const resizing = ref(false);
-function startResize(event: PointerEvent) {
-  event.preventDefault();
-  resizing.value = true;
-  const startHeight = dockRoot.value?.offsetHeight ?? dockHeight.value;
+const { startResize } = useDockResize({
+  dockHeight,
+  minHeight: DOCK_MIN_HEIGHT_PX,
+  maxHeightRatio: DOCK_MAX_VIEWPORT_RATIO,
+  dockElement: () => dockRoot.value ?? null,
+});
+
+function onResizeHandlePointerDown(event: PointerEvent) {
+  if (event.button !== 0) return;
+  // Leave maximized/collapsed before the drag measures the rendered height:
+  // the composable starts from the currently rendered px height, so the
+  // transition stays seamless.
   setDockMaximized(false);
   collapsed.value = false;
-  dockHeight.value = Math.max(startHeight, DOCK_MIN_HEIGHT_PX);
-  const startY = event.clientY;
-  const onMove = (moveEvent: PointerEvent) => {
-    const next = startHeight - (moveEvent.clientY - startY);
-    dockHeight.value = Math.min(Math.max(next, DOCK_MIN_HEIGHT_PX), Math.floor(window.innerHeight * 0.8));
-  };
-  const onUp = () => {
-    resizing.value = false;
-    window.removeEventListener("pointermove", onMove);
-    window.removeEventListener("pointerup", onUp);
-  };
-  window.addEventListener("pointermove", onMove);
-  window.addEventListener("pointerup", onUp);
+  startResize(event);
 }
 
 // "+" picker menu: anchored below the + button, bottom-stuck inside the dock,
@@ -229,8 +232,11 @@ onScopeDispose(() => window.removeEventListener("pointerdown", onPlusMenuOutside
 </script>
 
 <template>
-  <div v-if="visible" ref="dockRoot" data-plugin-bottom-dock class="relative z-10 flex shrink-0 flex-col overflow-hidden border-t bg-background" :style="{ height: maximized ? '70vh' : collapsed ? '2.25rem' : `${dockHeight}px` }">
-    <div data-plugin-dock-resize-handle class="absolute inset-x-0 top-0 z-10 h-1.5 cursor-row-resize hover:bg-primary/30" @pointerdown="startResize" />
+  <!-- v-show, not v-if (HOST_PLUGIN_UI_SPEC §8.3): hiding the panel must only
+       hide the UI — the entry webviews (and the user's dragged height) stay
+       mounted and alive across hide/show. -->
+  <div v-show="visible" ref="dockRoot" data-plugin-bottom-dock class="relative z-10 flex shrink-0 flex-col overflow-hidden border-t bg-background" :style="{ height: maximized ? `${DOCK_MAX_VIEWPORT_RATIO * 100}vh` : collapsed ? '2.25rem' : `${dockHeight}px` }">
+    <div data-plugin-dock-resize-handle class="absolute inset-x-0 top-0 z-10 h-1.5 cursor-row-resize hover:bg-primary/30" @pointerdown="onResizeHandlePointerDown" />
     <div class="flex h-9 shrink-0 items-center gap-1 border-b bg-muted/30 pl-2 pr-3">
       <div class="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto" data-plugin-dock-tabs>
         <button

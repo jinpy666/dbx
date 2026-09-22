@@ -84,12 +84,18 @@ const { toast } = useToast();
 // surface (next to Settings/AI); clicking runs the command (presentation: panel -> the global bottom dock),
 // clicking again collapses an open dock command.
 const { entries: pluginCommandEntries, open: openPluginCommand } = usePluginToolbarCommands();
-const { visible: dockVisible } = usePluginBottomDock();
-// The toolbar icon toggles panel visibility (terminal sessions survive hiding); with an empty panel
-// the first click runs the first plugin command (panel -> adds a local terminal and shows it).
+const { entries: pluginDockEntries, visible: dockVisible } = usePluginBottomDock();
+// The toolbar icon toggles panel visibility (panel hide keeps the webviews
+// mounted, so sessions and height survive); with a hidden-but-populated dock
+// the first click just restores it, and only an empty dock runs the command
+// (otherwise "getting the panel back" would keep spawning new terminals).
 function togglePluginCommand(entry: PluginToolbarCommandEntry) {
   if (dockVisible.value) {
     setDockVisible(false);
+    return;
+  }
+  if (pluginDockEntries.value.length) {
+    setDockVisible(true);
     return;
   }
   const result = openPluginCommand(entry);
