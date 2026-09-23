@@ -198,6 +198,9 @@ function onPlusAction(value: string) {
         connectionId: connection.id,
         providerId: connection.plugin_connection_provider,
         connectionType: connection.plugin_connection_type,
+        // §8.3 面板加载生命周期：标记宿主已在点击时预拨号，插件面板就绪后
+        // 跳过 force 重开、直接开会话。
+        connectionPreconnected: true,
         connection: {
           id: connection.id,
           name: connection.name,
@@ -208,6 +211,11 @@ function onPlusAction(value: string) {
         },
       },
     });
+    // 点击即拨号：SSH 握手与面板 webview 引导（数秒）并行，面板就绪即会话就绪。
+    // 无 force：同连接已有存活会话时这是健康检查级 no-op，不会打断它。
+    void useConnectionStore()
+      .ensureConnected(connection.id, { activate: false })
+      .catch(() => undefined);
     activatePluginDockEntry(id);
   }
 }
