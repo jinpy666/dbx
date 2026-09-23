@@ -99,3 +99,27 @@ describe("pluginBottomDock", () => {
     expect(state.activeEntryId.value).toBeNull();
   });
 });
+
+describe("dock tab order and titles", () => {
+  it("moves entries by drag target index, clamped", async () => {
+    const dock = await loadModule();
+    const ids = ["a", "b", "c"].map((title, index) => dock.addPluginDockEntry({ pluginId: "p", workbenchContributionId: "w", kind: "command", commandId: `cmd-${index}`, title }));
+    dock.movePluginDockEntry(ids[0]!, 2);
+    expect(dock.usePluginBottomDock().entries.value.map((entry) => entry.title)).toEqual(["b", "c", "a"]);
+    dock.movePluginDockEntry(ids[0]!, 99);
+    expect(dock.usePluginBottomDock().entries.value.map((entry) => entry.title)).toEqual(["b", "c", "a"]);
+    dock.movePluginDockEntry(ids[0]!, -5);
+    expect(dock.usePluginBottomDock().entries.value.map((entry) => entry.title)).toEqual(["a", "b", "c"]);
+    dock.movePluginDockEntry("missing", 0);
+  });
+
+  it("renames a tab and ignores blank titles", async () => {
+    const dock = await loadModule();
+    const id = dock.addPluginDockEntry({ pluginId: "p", workbenchContributionId: "w", kind: "command", commandId: "cmd", title: "Local terminal" });
+    dock.renamePluginDockEntry(id, "  build shell  ");
+    expect(dock.usePluginBottomDock().entries.value[0]!.title).toBe("build shell");
+    dock.renamePluginDockEntry(id, "   ");
+    expect(dock.usePluginBottomDock().entries.value[0]!.title).toBe("build shell");
+    dock.renamePluginDockEntry("missing", "x");
+  });
+});

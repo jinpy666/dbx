@@ -617,6 +617,8 @@ export default withEnglishFallback({
     newTerminal: "新規ターミナル",
     newLocalTerminal: "ローカルターミナル",
     connectionTerminal: "接続",
+    filter: "フィルタ…",
+    noMatch: "一致する項目がありません",
   },
   sidebar: {
     connections: "接続",

@@ -626,6 +626,8 @@ export default {
     newTerminal: "New terminal",
     newLocalTerminal: "Local terminal",
     connectionTerminal: "Connection",
+    filter: "Filter…",
+    noMatch: "No matches",
   },
   sidebar: {
     connections: "CONNECTIONS",

@@ -620,6 +620,8 @@ export default withEnglishFallback({
     newTerminal: "新增終端",
     newLocalTerminal: "本機終端",
     connectionTerminal: "連線",
+    filter: "篩選…",
+    noMatch: "沒有符合項目",
   },
   sidebar: {
     connections: "連線",

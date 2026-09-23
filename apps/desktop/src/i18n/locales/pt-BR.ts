@@ -617,6 +617,8 @@ export default withEnglishFallback({
     newTerminal: "Novo terminal",
     newLocalTerminal: "Terminal local",
     connectionTerminal: "Conexão",
+    filter: "Filtrar…",
+    noMatch: "Nenhuma correspondência",
   },
   sidebar: {
     connections: "CONEXÕES",

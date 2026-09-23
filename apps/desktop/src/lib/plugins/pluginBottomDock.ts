@@ -113,6 +113,24 @@ export function closePluginDockEntry(id: string): void {
   if (!dockEntries.value.length) dockVisible.value = false;
 }
 
+/** Drag & drop reorder: moves the entry to the target index (clamped). */
+export function movePluginDockEntry(id: string, toIndex: number): void {
+  const from = dockEntries.value.findIndex((entry) => entry.id === id);
+  if (from < 0) return;
+  const to = Math.max(0, Math.min(toIndex, dockEntries.value.length - 1));
+  if (to === from) return;
+  const [entry] = dockEntries.value.splice(from, 1);
+  dockEntries.value.splice(to, 0, entry);
+}
+
+/** Tab rename (double-click): blank titles keep the current one (stable titles). */
+export function renamePluginDockEntry(id: string, title: string): void {
+  const entry = dockEntries.value.find((candidate) => candidate.id === id);
+  const next = title.trim();
+  if (!entry || !next) return;
+  entry.title = next;
+}
+
 /** Hides/shows the panel without killing the terminal sessions. */
 export function setDockVisible(visible: boolean): void {
   if (visible && !dockEntries.value.length) return;

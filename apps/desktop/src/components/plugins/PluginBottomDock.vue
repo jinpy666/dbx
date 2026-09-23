@@ -4,7 +4,7 @@
 // panel webviews, with zero plugin business inside; multi-terminal/shell selection/connection switching all live in the plugin
 // the plugin's own panel page via the bridge openWorkbench, which adds another dock entry).
 // Each entry owns a host-stable workbenchId; v-show keeps sessions alive while switching tabs.
-import { computed, onScopeDispose, ref, watch } from "vue";
+import { computed, nextTick, onScopeDispose, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { ChevronDown, ChevronUp, Maximize2, Minimize2, Plus, X } from "@lucide/vue";
 import { Button } from "@/components/ui/button";
@@ -12,7 +12,21 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import PluginIcon from "@/components/plugins/PluginIcon.vue";
 import PluginWorkbenchHost from "@/components/plugins/PluginWorkbenchHost.vue";
 import { useConnectionStore } from "@/stores/connectionStore";
-import { activatePluginDockEntry, addPluginDockEntry, closePluginDockEntry, DOCK_MAX_VIEWPORT_RATIO, DOCK_MIN_HEIGHT_PX, persistDockHeight, restoreDockHeight, setDockMaximized, setDockVisible, usePluginBottomDock } from "@/lib/plugins/pluginBottomDock";
+import {
+  activatePluginDockEntry,
+  addPluginDockEntry,
+  closePluginDockEntry,
+  DOCK_MAX_VIEWPORT_RATIO,
+  DOCK_MIN_HEIGHT_PX,
+  movePluginDockEntry,
+  persistDockHeight,
+  renamePluginDockEntry,
+  restoreDockHeight,
+  setDockMaximized,
+  setDockVisible,
+  usePluginBottomDock,
+  type PluginDockEntry,
+} from "@/lib/plugins/pluginBottomDock";
 import { useDockResize } from "@/composables/useDockResize";
 import { executePluginCommand } from "@/lib/plugins/pluginCommandRegistry";
 import { createFrontendPluginRegistry } from "@/lib/plugins/frontendPlugin";
@@ -21,6 +35,49 @@ import * as api from "@/lib/backend/api";
 import type { InstalledPlugin, PluginWorkbenchContribution } from "@/types/database";
 
 const { t } = useI18n();
+// Tab strip interactions (drag reorder + double-click rename).
+const dragEntryId = ref<string | null>(null);
+const renamingEntryId = ref<string | null>(null);
+const renameDraft = ref("");
+const renameInput = ref<HTMLInputElement | null>(null);
+function setRenameInputRef(element: unknown) {
+  renameInput.value = element as HTMLInputElement | null;
+}
+watch(renamingEntryId, async (id) => {
+  if (!id) return;
+  await nextTick();
+  renameInput.value?.select();
+});
+function startRename(entry: PluginDockEntry) {
+  renamingEntryId.value = entry.id;
+  renameDraft.value = entry.title;
+}
+function commitRename() {
+  if (!renamingEntryId.value) return;
+  renamePluginDockEntry(renamingEntryId.value, renameDraft.value);
+  renamingEntryId.value = null;
+}
+function cancelRename() {
+  renamingEntryId.value = null;
+}
+function onTabDragStart(entry: PluginDockEntry, event: DragEvent) {
+  dragEntryId.value = entry.id;
+  if (event.dataTransfer) {
+    event.dataTransfer.setData("text/plain", entry.id);
+    event.dataTransfer.effectAllowed = "move";
+  }
+}
+// Live reorder while hovering the target tab: the dragged entry jumps to the
+// target's slot immediately, which keeps the gesture simple and predictable.
+function onTabDragOver(entry: PluginDockEntry) {
+  if (!dragEntryId.value || dragEntryId.value === entry.id) return;
+  const toIndex = entries.value.findIndex((candidate) => candidate.id === entry.id);
+  if (toIndex < 0) return;
+  movePluginDockEntry(dragEntryId.value, toIndex);
+}
+function onTabDragEnd() {
+  dragEntryId.value = null;
+}
 const queryStore = useQueryStore();
 const { entries, activeEntryId, visible, maximized } = usePluginBottomDock();
 const collapsed = ref(false);
@@ -235,9 +292,22 @@ function onResizeHandlePointerDown(event: PointerEvent) {
 // growing upward with content (capped by the dock body), closed by selecting
 // an item or clicking anywhere else.
 const plusOpen = ref(false);
+// Generic list filter for the "+" picker: purely client-side label matching so
+// any plugin's long option/target list stays usable without the host knowing
+// what the entries mean.
+const plusFilter = ref("");
+const PLUS_FILTER_THRESHOLD = 8;
+const plusItemCount = computed(() => 1 + launchOptionEntries.value.length + connectionTargets.value.length);
+const plusQuery = computed(() => plusFilter.value.trim().toLowerCase());
+function plusMatches(label: string): boolean {
+  return !plusQuery.value || label.toLowerCase().includes(plusQuery.value);
+}
+const visibleLaunchOptions = computed(() => launchOptionEntries.value.filter((option) => plusMatches(option.label)));
+const visibleConnectionTargets = computed(() => connectionTargets.value.filter((target) => plusMatches(target.label)));
 const plusRoot = ref<HTMLElement>();
 function togglePlusMenu() {
   plusOpen.value = !plusOpen.value;
+  plusFilter.value = "";
   if (plusOpen.value) void loadLaunchOptions();
 }
 function closePlusMenu() {
@@ -262,14 +332,32 @@ onScopeDispose(() => window.removeEventListener("pointerdown", onPlusMenuOutside
         <button
           v-for="entry in entries"
           :key="entry.id"
-          class="group flex h-7 shrink-0 items-center gap-1.5 rounded-md px-2 text-xs"
-          :class="entry.id === activeEntryId ? 'bg-accent font-medium text-foreground' : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
+          class="group flex h-7 min-w-0 max-w-40 shrink items-center gap-1 overflow-hidden rounded-md px-2 text-xs"
+          :class="[entry.id === activeEntryId ? 'bg-accent font-medium text-foreground' : 'text-muted-foreground hover:bg-muted hover:text-foreground', dragEntryId && dragEntryId !== entry.id ? 'opacity-60' : '']"
           :title="entry.title"
+          :draggable="renamingEntryId !== entry.id"
           @click="activatePluginDockEntry(entry.id)"
+          @dblclick="startRename(entry)"
+          @dragstart="onTabDragStart(entry, $event)"
+          @dragover.prevent="onTabDragOver(entry)"
+          @dragend="onTabDragEnd"
+          @drop.prevent="onTabDragEnd"
         >
           <PluginIcon :plugin-id="entry.pluginId" :icon="entry.icon" class="h-3.5 w-3.5 shrink-0" />
-          <span class="max-w-40 truncate">{{ entry.title }}</span>
-          <span class="ml-0.5 rounded p-0.5 opacity-0 transition-opacity hover:bg-background/80 group-hover:opacity-100" role="button" :aria-label="t('pluginDock.close')" @click.stop="closeEntry(entry.id)">
+          <input
+            v-if="renamingEntryId === entry.id"
+            :ref="setRenameInputRef"
+            v-model="renameDraft"
+            class="min-w-0 flex-1 bg-transparent text-xs outline-none"
+            spellcheck="false"
+            @click.stop
+            @dblclick.stop
+            @keydown.enter.prevent="commitRename"
+            @keydown.escape.prevent="cancelRename"
+            @blur="commitRename"
+          />
+          <span v-else class="min-w-0 flex-1 truncate text-left">{{ entry.title }}</span>
+          <span v-if="renamingEntryId !== entry.id" class="ml-0.5 shrink-0 rounded p-0.5 opacity-0 transition-opacity hover:bg-background/80 group-hover:opacity-100" role="button" :aria-label="t('pluginDock.close')" @click.stop="closeEntry(entry.id)">
             <X class="h-3 w-3" />
           </span>
         </button>
@@ -284,16 +372,22 @@ onScopeDispose(() => window.removeEventListener("pointerdown", onPlusMenuOutside
           <TooltipContent>{{ t("pluginDock.newTerminal") }}</TooltipContent>
         </Tooltip>
         <div v-if="plusOpen" data-plugin-dock-plus-menu class="absolute right-0 top-full z-30 mt-1 max-h-[50vh] w-64 overflow-y-auto rounded-md border bg-background p-1 shadow-lg" role="menu">
-          <button class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs hover:bg-muted" role="menuitem" @click="onPlusAction('replay')">
+          <!-- Generic list filter (appears only for long lists): the host filters
+               by label without knowing what the entries mean. -->
+          <input v-if="plusItemCount > PLUS_FILTER_THRESHOLD" v-model="plusFilter" class="mb-1 w-full rounded-md border bg-background px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-primary/40" :placeholder="t('pluginDock.filter')" spellcheck="false" @keydown.stop />
+          <button v-if="plusMatches(t('pluginDock.newTerminal'))" class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs hover:bg-muted" role="menuitem" @click="onPlusAction('replay')">
             <Plus class="h-3.5 w-3.5 shrink-0" />
             <span class="truncate">{{ t("pluginDock.newTerminal") }}</span>
           </button>
-          <button v-for="option in launchOptionEntries" :key="option.key" class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs hover:bg-muted" role="menuitem" @click="onPlusAction(option.key)">
+          <button v-for="option in visibleLaunchOptions" :key="option.key" class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs hover:bg-muted" role="menuitem" @click="onPlusAction(option.key)">
             <span class="truncate">{{ option.label }}</span>
           </button>
-          <button v-for="target in connectionTargets" :key="target.key" class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs hover:bg-muted" role="menuitem" :title="target.connection.name" @click="onPlusAction(target.key)">
+          <button v-for="target in visibleConnectionTargets" :key="target.key" class="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs hover:bg-muted" role="menuitem" :title="target.connection.name" @click="onPlusAction(target.key)">
             <span class="truncate">{{ t("pluginDock.connectionTerminal") }} · {{ target.label }}</span>
           </button>
+          <div v-if="plusQuery && !plusMatches(t('pluginDock.newTerminal')) && !visibleLaunchOptions.length && !visibleConnectionTargets.length" class="px-2 py-1.5 text-xs text-muted-foreground">
+            {{ t("pluginDock.noMatch") }}
+          </div>
         </div>
       </div>
       <Tooltip :delay-duration="200">

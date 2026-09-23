@@ -618,6 +618,8 @@ export default withEnglishFallback({
     newTerminal: "Nuevo terminal",
     newLocalTerminal: "Terminal local",
     connectionTerminal: "Conexión",
+    filter: "Filtrar…",
+    noMatch: "Sin coincidencias",
   },
   sidebar: {
     connections: "CONEXIONES",
