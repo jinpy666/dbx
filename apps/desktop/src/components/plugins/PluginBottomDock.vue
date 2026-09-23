@@ -33,7 +33,9 @@ const plugins = ref<InstalledPlugin[]>([]);
 const activeEntry = computed(() => entries.value.find((entry) => entry.id === activeEntryId.value) ?? null);
 const activeCommand = computed(() => {
   const entry = activeEntry.value;
-  if (!entry || entry.kind !== "command" || !entry.commandId) return null;
+  // Connection entries carry their source commandId too, so the "+" picker
+  // (replay / launch options / connection targets) is available on every panel.
+  if (!entry || !entry.commandId) return null;
   return createFrontendPluginRegistry(plugins.value).findCommand(entry.pluginId, entry.commandId)?.contribution ?? null;
 });
 

@@ -488,13 +488,22 @@ async function inlineLocalUiAssets(html: string, pluginId: string): Promise<{ ht
   // script; its directory is the <base> the sandbox document needs to resolve
   // them through the dbx-plugin scheme.
   let entryDirectory = "";
-  for (const resource of resources) {
-    const source = resource.getAttribute(resource.tagName === "SCRIPT" ? "src" : "href");
-    const path = source ? localUiAssetPath(source) : undefined;
-    if (!path) continue;
-    if (!entryDirectory) entryDirectory = path.split("/").slice(0, -1).join("/");
-    const asset = await api.readPluginUiAsset(pluginId, path);
-    const content = new TextDecoder().decode(Uint8Array.from(atob(asset.dataBase64), (character) => character.charCodeAt(0)));
+  // Fetch every referenced asset concurrently — these are bridge round-trips
+  // into the sidecar, and panels reopen this path on every workbench (re)load.
+  const fetched = await Promise.all(
+    resources.map((resource) => {
+      const source = resource.getAttribute(resource.tagName === "SCRIPT" ? "src" : "href");
+      const path = source ? localUiAssetPath(source) : undefined;
+      if (!path) return Promise.resolve({ resource, content: null });
+      if (!entryDirectory) entryDirectory = path.split("/").slice(0, -1).join("/");
+      return api.readPluginUiAsset(pluginId, path).then((asset) => ({
+        resource,
+        content: new TextDecoder().decode(Uint8Array.from(atob(asset.dataBase64), (character) => character.charCodeAt(0))),
+      }));
+    }),
+  );
+  for (const { resource, content } of fetched) {
+    if (content === null) continue;
     if (resource.tagName === "SCRIPT") {
       const script = document.createElement("script");
       for (const attribute of [...resource.attributes]) {
