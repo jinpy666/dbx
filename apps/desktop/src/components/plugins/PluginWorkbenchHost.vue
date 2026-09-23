@@ -482,6 +482,12 @@ function localUiAssetPath(source: string): string | undefined {
 }
 
 async function inlineLocalUiAssets(html: string, pluginId: string): Promise<{ html: string; entryDirectory: string }> {
+  // Shipped ui builds usually inline every asset into one HTML document.
+  // Parsing and re-serializing a multi-megabyte document is pure overhead when
+  // there is nothing local to inline — pre-check before touching DOMParser.
+  if (!/<script\b[^>]*\bsrc=/i.test(html) && !/<link\b[^>]*rel=["']?stylesheet/i.test(html)) {
+    return { html, entryDirectory: "" };
+  }
   const document = new DOMParser().parseFromString(html, "text/html");
   const resources = [...document.querySelectorAll("script[src], link[rel='stylesheet'][href]")];
   // Dynamic-import chunks and CSS url() references live next to the entry
@@ -532,6 +538,10 @@ function pluginUiBaseUrl(pluginId: string, entryDirectory: string): string | und
   return entryDirectory ? `${origin}${entryDirectory}/` : origin;
 }
 
+// Inlined plugin ui html per `${pluginId}:${version}` (see loadWorkbench).
+const pluginUiHtmlCache = new Map<string, { html: string; entryDirectory: string }>();
+const PLUGIN_UI_HTML_CACHE_LIMIT = 4;
+
 async function loadWorkbench() {
   const generation = ++loadGeneration;
   bridge?.dispose();
@@ -541,11 +551,26 @@ async function loadWorkbench() {
   error.value = "";
   try {
     if (!props.plugin.compatibility.compatible) throw new Error((props.plugin.compatibility.errors || []).join("; ") || t("pluginPlatform.pluginIncompatible"));
-    const asset = await api.readPluginUiEntry(props.plugin.manifest.id);
-    if (disposed || generation !== loadGeneration) return;
-    const bytes = Uint8Array.from(atob(asset.dataBase64), (character) => character.charCodeAt(0));
-    const { html, entryDirectory } = await inlineLocalUiAssets(new TextDecoder().decode(bytes), props.plugin.manifest.id);
-    if (disposed || generation !== loadGeneration) return;
+    // The read/decode/inline pipeline over a multi-megabyte ui build dominates
+    // workbench open time; cache the inlined html per plugin id+version so
+    // reopening panels (new dock entries, workbench reloads) skips it. Theme
+    // is applied per load via the sandbox document, so the cache never pins a
+    // stale appearance.
+    const htmlCacheKey = `${props.plugin.manifest.id}:${props.plugin.manifest.version}`;
+    let cachedHtml = pluginUiHtmlCache.get(htmlCacheKey);
+    if (!cachedHtml) {
+      const asset = await api.readPluginUiEntry(props.plugin.manifest.id);
+      if (disposed || generation !== loadGeneration) return;
+      const bytes = Uint8Array.from(atob(asset.dataBase64), (character) => character.charCodeAt(0));
+      const inlined = await inlineLocalUiAssets(new TextDecoder().decode(bytes), props.plugin.manifest.id);
+      if (disposed || generation !== loadGeneration) return;
+      cachedHtml = inlined;
+      pluginUiHtmlCache.set(htmlCacheKey, cachedHtml);
+      while (pluginUiHtmlCache.size > PLUGIN_UI_HTML_CACHE_LIMIT) {
+        pluginUiHtmlCache.delete(pluginUiHtmlCache.keys().next().value as string);
+      }
+    }
+    const { html, entryDirectory } = cachedHtml;
     source.value = pluginSandboxDocument(html, props.plugin.manifest.permissions, currentBridgeTheme(), {
       baseUrl: pluginUiBaseUrl(props.plugin.manifest.id, entryDirectory),
     });
