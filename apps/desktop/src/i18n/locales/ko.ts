@@ -629,8 +629,6 @@ export default withEnglishFallback({
   },
   sidebar: {
     connections: "연결",
-    pluginEntries: "플러그인 항목",
-    pluginEntrySource: "플러그인: {name}",
     noConnections: "아직 연결이 없습니다",
     importExport: "가져오기 / 내보내기",
     import: "연결 가져오기",

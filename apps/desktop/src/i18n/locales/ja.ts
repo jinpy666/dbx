@@ -622,8 +622,6 @@ export default withEnglishFallback({
   },
   sidebar: {
     connections: "接続",
-    pluginEntries: "プラグインエントリ",
-    pluginEntrySource: "プラグインから: {name}",
     noConnections: "まだ接続がありません",
     importExport: "インポート / エクスポート",
     import: "接続をインポート",

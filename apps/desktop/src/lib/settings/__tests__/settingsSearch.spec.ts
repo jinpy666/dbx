@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 import {
   SETTINGS_SEARCH_DEFINITIONS,
   TOOLBAR_VISIBILITY_ITEMS,
-  createPluginToolbarCommandSearchDefinitions,
   createShortcutSettingsSearchDefinitions,
   createToolbarVisibilitySettingsSearchDefinitions,
   resolveSettingsCategory,

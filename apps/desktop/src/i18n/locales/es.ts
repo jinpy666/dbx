@@ -623,8 +623,6 @@ export default withEnglishFallback({
   },
   sidebar: {
     connections: "CONEXIONES",
-    pluginEntries: "Entradas de plugins",
-    pluginEntrySource: "Del plugin: {name}",
     noConnections: "Sin conexiones",
     importExport: "Importar / Exportar",
     import: "Importar conexiones",

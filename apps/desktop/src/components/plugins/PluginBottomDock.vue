@@ -118,6 +118,17 @@ function definitionFor(pluginId: string): InstalledPlugin | undefined {
   return plugins.value.find((candidate) => candidate.manifest.id === pluginId);
 }
 
+// A live entry can outlive its contribution (plugin upgrade/downgrade changed
+// the workbench id, or dropped the contribution entirely). The host renders
+// props.contribution.label unconditionally, so return null and let the v-if
+// degrade the panel to an empty frame instead of crashing — same degradation
+// as the missing-plugin case; the tab (and its close button) stays available.
+function workbenchContributionFor(entry: PluginDockEntry): PluginWorkbenchContribution | null {
+  const definition = definitionFor(entry.pluginId);
+  if (!definition) return null;
+  return (definition.manifest.contributions || []).find((candidate): candidate is PluginWorkbenchContribution => candidate.type === "workbench" && candidate.id === entry.workbenchContributionId) ?? null;
+}
+
 // Generic "+" picker (extension-point driven, zero business in the host):
 // - the command itself (replay),
 // - dynamic entries from the declared sidecar options_action (e.g. shell types),
@@ -418,10 +429,10 @@ onScopeDispose(() => window.removeEventListener("pointerdown", onPlusMenuOutside
     <div class="min-h-0 flex-1 overflow-hidden">
       <div v-for="entry in entries" v-show="entry.id === activeEntryId && !collapsed" :key="entry.id" class="h-full w-full">
         <PluginWorkbenchHost
-          v-if="definitionFor(entry.pluginId)"
+          v-if="workbenchContributionFor(entry)"
           :ref="setWorkbenchHostRef(entry.id)"
           :plugin="definitionFor(entry.pluginId)!"
-          :contribution="(definitionFor(entry.pluginId)!.manifest.contributions || []).find((candidate): candidate is PluginWorkbenchContribution => candidate.type === 'workbench' && candidate.id === entry.workbenchContributionId)!"
+          :contribution="workbenchContributionFor(entry)!"
           :context="entry.context"
           @close-tab="closeEntry(entry.id)"
           @open-workbench="(_pluginId, contributionId, context) => onPanelOpenWorkbench(entry, contributionId, context)"

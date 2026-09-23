@@ -631,8 +631,6 @@ export default {
   },
   sidebar: {
     connections: "CONNECTIONS",
-    pluginEntries: "Plugin entries",
-    pluginEntrySource: "From plugin: {name}",
     noConnections: "No connections yet",
     importExport: "Import / Export",
     import: "Import Connections",

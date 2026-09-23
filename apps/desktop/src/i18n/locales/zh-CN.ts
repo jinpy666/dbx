@@ -547,8 +547,6 @@ export default withEnglishFallback({
   },
   sidebar: {
     connections: "连接",
-    pluginEntries: "插件入口",
-    pluginEntrySource: "来自插件：{name}",
     noConnections: "暂无连接",
     importExport: "导入/导出",
     import: "导入连接",
