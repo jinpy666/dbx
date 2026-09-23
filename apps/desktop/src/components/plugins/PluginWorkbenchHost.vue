@@ -21,6 +21,7 @@ import { buildPluginEditorAppearance } from "@/lib/plugins/pluginAppearance";
 import { downloadPluginFile, cancelPluginDownload } from "@/lib/plugins/pluginFileDownload";
 import type { InstalledPlugin, PluginUiContribution } from "@/types/database";
 import { useI18n } from "vue-i18n";
+import { getCachedPluginUiHtml, setCachedPluginUiHtml } from "@/lib/plugins/pluginUiHtmlCache";
 import { useTheme } from "@/composables/useTheme";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -539,8 +540,6 @@ function pluginUiBaseUrl(pluginId: string, entryDirectory: string): string | und
 }
 
 // Inlined plugin ui html per `${pluginId}:${version}` (see loadWorkbench).
-const pluginUiHtmlCache = new Map<string, { html: string; entryDirectory: string }>();
-const PLUGIN_UI_HTML_CACHE_LIMIT = 4;
 
 async function loadWorkbench() {
   const generation = ++loadGeneration;
@@ -557,7 +556,7 @@ async function loadWorkbench() {
     // is applied per load via the sandbox document, so the cache never pins a
     // stale appearance.
     const htmlCacheKey = `${props.plugin.manifest.id}:${props.plugin.manifest.version}`;
-    let cachedHtml = pluginUiHtmlCache.get(htmlCacheKey);
+    let cachedHtml = getCachedPluginUiHtml(htmlCacheKey);
     if (!cachedHtml) {
       const asset = await api.readPluginUiEntry(props.plugin.manifest.id);
       if (disposed || generation !== loadGeneration) return;
@@ -565,10 +564,7 @@ async function loadWorkbench() {
       const inlined = await inlineLocalUiAssets(new TextDecoder().decode(bytes), props.plugin.manifest.id);
       if (disposed || generation !== loadGeneration) return;
       cachedHtml = inlined;
-      pluginUiHtmlCache.set(htmlCacheKey, cachedHtml);
-      while (pluginUiHtmlCache.size > PLUGIN_UI_HTML_CACHE_LIMIT) {
-        pluginUiHtmlCache.delete(pluginUiHtmlCache.keys().next().value as string);
-      }
+      setCachedPluginUiHtml(htmlCacheKey, cachedHtml);
     }
     const { html, entryDirectory } = cachedHtml;
     source.value = pluginSandboxDocument(html, props.plugin.manifest.permissions, currentBridgeTheme(), {
