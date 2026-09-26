@@ -2400,6 +2400,7 @@ dependencies = [
  "dbx-sql-core",
  "dbx-sql-data",
  "dbx-sql-dialect",
+ "dbx-sql-schema",
  "dbx-sqlite-worker",
  "dbx-types",
  "deadpool-postgres",
