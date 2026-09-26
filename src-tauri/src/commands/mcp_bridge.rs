@@ -303,8 +303,9 @@ mod tests {
         effective_database_execution_policy, ensure_connection_in_mcp_scope, ensure_mcp_connection_sql_write_allowed,
         ensure_mcp_execute_and_show_supported, ensure_mcp_mongo_pipeline_target_allowed_by_id,
         ensure_mcp_sql_database_switch_allowed, is_terminal_routed_exec, mongo_filter_is_effectively_unbounded,
-        mongo_pipeline_has_write_stage, plugin_connection_summaries, plugin_connection_summary, resolve_connection,
-        resolve_mongo_database, resolve_mongo_target_values, write_port_file, AppState,
+        mongo_pipeline_has_write_stage, plugin_connection_summaries, plugin_connection_summary,
+        resolve_call_plugin_target, resolve_connection, resolve_mongo_database, resolve_mongo_target_values,
+        write_port_file, AppState,
     };
     use dbx_core::models::connection::{ConnectionConfig, DatabaseType};
     use dbx_core::storage::{McpConnectionPolicy, McpDatabasePolicy, McpDatabaseScope, McpGlobalPolicy};
@@ -343,6 +344,20 @@ mod tests {
         assert!(!default_data_dir.join("mcp-bridge-port").exists());
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn call_plugin_target_accepts_the_bound_plugin_with_or_without_an_echo() {
+        assert_eq!(resolve_call_plugin_target(Some("io.dbx.ssh"), None).unwrap(), "io.dbx.ssh");
+        assert_eq!(resolve_call_plugin_target(Some("io.dbx.ssh"), Some("io.dbx.ssh")).unwrap(), "io.dbx.ssh");
+    }
+
+    #[test]
+    fn call_plugin_target_rejects_override_and_unbound_connections() {
+        assert!(resolve_call_plugin_target(Some("io.dbx.ssh"), Some("io.dbx.files")).is_err());
+        assert!(resolve_call_plugin_target(None, Some("io.dbx.ssh")).is_err());
+        assert!(resolve_call_plugin_target(Some(""), Some("io.dbx.ssh")).is_err());
+        assert_eq!(resolve_call_plugin_target(None, None).unwrap_err(), "connection is not bound to a plugin");
     }
 
     #[test]
@@ -1354,6 +1369,26 @@ async fn plugin_agent_mode_on(state: &Arc<AppState>, plugin_id: &str, connection
         .is_some_and(|mode| mode == "auto" || mode == "strict")
 }
 
+/// `/call-plugin-tool` may only talk to the saved connection's own plugin:
+/// the lifecycle payload (which carries the connection's credentials) is
+/// built from the config, so honoring a request-named `plugin_id` would hand
+/// connection A's secrets to plugin B's sidecar. Callers may repeat the
+/// binding, never override it.
+fn resolve_call_plugin_target(
+    config_plugin_id: Option<&str>,
+    request_plugin_id: Option<&str>,
+) -> Result<String, String> {
+    let bound = config_plugin_id
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| "connection is not bound to a plugin".to_string())?;
+    if let Some(requested) = request_plugin_id {
+        if requested != bound {
+            return Err(format!("plugin_id {requested:?} does not match the connection's plugin {bound:?}"));
+        }
+    }
+    Ok(bound.to_string())
+}
+
 /// POST /call-plugin-tool: runs a plugin MCP tool on the desktop app's own
 /// plugin session — the same sidecar process the workbench talks to. The
 /// connection's workbench tab is opened only when the call will route into
@@ -1381,11 +1416,13 @@ async fn handle_call_plugin_tool(
             return;
         }
     };
-    let plugin_id = req.plugin_id.or_else(|| config.plugin_id.clone()).unwrap_or_default();
-    if plugin_id.is_empty() {
-        respond_error(stream, "400 Bad Request", "connection is not bound to a plugin").await;
-        return;
-    }
+    let plugin_id = match resolve_call_plugin_target(config.plugin_id.as_deref(), req.plugin_id.as_deref()) {
+        Ok(plugin_id) => plugin_id,
+        Err(message) => {
+            respond_error(stream, "400 Bad Request", &message).await;
+            return;
+        }
+    };
     // The workbench tab only needs to exist when the forwarded call will
     // actually route into the visible terminal: an explicit runInTerminal,
     // or no flag plus the connection's terminal MCP mode being on (asked
