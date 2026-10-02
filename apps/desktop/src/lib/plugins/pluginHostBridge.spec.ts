@@ -1885,4 +1885,27 @@ describe("AI completion bridge", () => {
     expect((await request("host.ai.generateText", { pluginName: "forged", configId: "one", model: "a", prompt: "hi" })).result).toBe("fix: example");
     expect(api.generateAiText).toHaveBeenCalledWith("Sample", { configId: "one", model: "a", prompt: "hi" });
   });
+  it("validates the host-owned task enum and forwards known presets only", async () => {
+    const messages: any[] = [];
+    const target = { postMessage: (message: unknown) => messages.push(message) } as unknown as Window;
+    const generateAiText = vi.fn().mockResolvedValue("ls -la");
+    const bridge = new PluginHostBridge(plugin(["host.ai"]), workbench, {}, () => target, { invoke: vi.fn(), notify: vi.fn(), sendBinary: vi.fn(), readAsset: vi.fn(), generateAiText });
+    const request = async (params: unknown) => {
+      const count = messages.length;
+      bridge.handleWindowMessage({ source: target, data: { source: "dbx-plugin", version: 1, type: "request", id: String(count), method: "host.ai.generateText", params } } as MessageEvent);
+      await vi.waitFor(() => expect(messages.length).toBe(count + 1));
+      return messages[count];
+    };
+    expect((await request({ configId: "one", model: "a", prompt: "hi", task: "system prompt injection" })).error).toContain("Invalid AI task");
+    expect(generateAiText).not.toHaveBeenCalled();
+    expect((await request({ configId: "one", model: "a", prompt: "hi", task: 42 })).error).toContain("Invalid AI task");
+    expect((await request({ configId: "one", model: "a", prompt: "hi", task: "command-generation" })).result).toBe("ls -la");
+    expect(generateAiText).toHaveBeenCalledWith("Sample", { configId: "one", model: "a", prompt: "hi", task: "command-generation" });
+    // Absent/null task keeps the exact legacy call shape.
+    generateAiText.mockClear();
+    expect((await request({ configId: "one", model: "a", prompt: "hi" })).result).toBe("ls -la");
+    expect(generateAiText).toHaveBeenCalledWith("Sample", { configId: "one", model: "a", prompt: "hi" });
+    expect((await request({ configId: "one", model: "a", prompt: "hi", task: null })).result).toBe("ls -la");
+    expect(generateAiText).toHaveBeenLastCalledWith("Sample", { configId: "one", model: "a", prompt: "hi" });
+  });
 });

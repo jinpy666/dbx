@@ -1,4 +1,5 @@
-import type { PluginAiProvider, PluginAiModel, PluginAiGenerateRequest } from "./pluginAiCompletion";
+import { PLUGIN_AI_TASKS } from "./pluginAiCompletion";
+import type { PluginAiProvider, PluginAiModel, PluginAiGenerateRequest, PluginAiTask } from "./pluginAiCompletion";
 import type { InstalledPlugin, PluginBinaryEvent, PluginEvent, PluginUiAssetPayload, PluginUiContribution } from "@/types/database";
 import { clonePluginData, snapshotPluginWorkbenchContext } from "./pluginData";
 import { MAX_PLUGIN_PLAN_SQL_CHARS, MAX_PLUGIN_PLAN_TIMEOUT_MS, PLUGIN_PLAN_PERMISSION, type PluginPlanCapabilities, type PluginPlanRequest, type PluginPlanResult } from "@/types/pluginPlan";
@@ -615,7 +616,10 @@ export class PluginHostBridge {
       for (const key of ["configId", "model", "prompt"] as const) {
         if (typeof input[key] !== "string" || !input[key].trim() || input[key].length > (key === "prompt" ? 100000 : 256)) throw new Error("Invalid AI " + key);
       }
-      return this.api.generateAiText(this.plugin.manifest.name, { configId: input.configId as string, model: input.model as string, prompt: input.prompt as string });
+      // Task presets are a closed host-owned enum: a plugin picks a template,
+      // it never writes system text. Unknown values fail loudly.
+      const task = input.task === undefined || input.task === null ? undefined : requirePluginAiTask(input.task);
+      return this.api.generateAiText(this.plugin.manifest.name, { configId: input.configId as string, model: input.model as string, prompt: input.prompt as string, ...(task === undefined ? {} : { task }) });
     }
     if (method === "host.ai.openConversation") {
       this.requirePermission("host.ai");
@@ -1405,6 +1409,12 @@ function validRequestMessage(value: Record<string, unknown>): value is Record<st
 function requireRecord(value: unknown, label: string): Record<string, unknown> {
   if (!isRecord(value)) throw new Error(`${label} must be an object`);
   return value;
+}
+
+/** A host-owned AI task preset (E3): the enum is closed, so unknown values fail here. */
+function requirePluginAiTask(value: unknown): PluginAiTask {
+  if (typeof value !== "string" || !PLUGIN_AI_TASKS.includes(value as PluginAiTask)) throw new Error("Invalid AI task");
+  return value as PluginAiTask;
 }
 
 function requireProtocolName(value: unknown, label: string): string {
