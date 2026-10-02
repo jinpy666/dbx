@@ -18,6 +18,36 @@ export interface PluginAiGenerateRequest {
   prompt: string;
 }
 
+/**
+ * What the consent dialog shows about the text a plugin is about to send:
+ * the prompt's first line (multi-line prompts are truncated to one display
+ * line) and the full prompt size in bytes. The full prompt is never rendered,
+ * so a huge or binary-ish prompt cannot blow up the dialog.
+ */
+export interface PluginAiPromptPreview {
+  firstLine: string;
+  bytes: number;
+}
+
+/** Longest first line the consent preview renders. */
+export const PLUGIN_AI_PREVIEW_FIRST_LINE_CHARS = 200;
+
+export function pluginAiPromptPreview(prompt: string): PluginAiPromptPreview {
+  const firstLine = (prompt.split(/\r?\n/, 1)[0] ?? "").slice(0, PLUGIN_AI_PREVIEW_FIRST_LINE_CHARS);
+  return { firstLine, bytes: new TextEncoder().encode(prompt).byteLength };
+}
+
+/**
+ * Answer of the host consent surface. A plain boolean keeps working for hosts
+ * without a "remember" option; the object form additionally reports the
+ * workbench-session memory choice.
+ */
+export type PluginAiConfirmDecision = boolean | { allowed: boolean; remember?: boolean };
+
+function confirmAllowed(decision: PluginAiConfirmDecision): boolean {
+  return typeof decision === "object" && decision !== null ? decision.allowed === true : decision === true;
+}
+
 // Only explicitly configured API models are exposed. CLI agents are excluded:
 // this surface is text completion and must never launch an agent with tools.
 export function pluginAiModels(configs: AiConfigItem[]): PluginAiModel[] {
@@ -33,8 +63,21 @@ export function pluginAiModels(configs: AiConfigItem[]): PluginAiModel[] {
     );
 }
 
-export function createPluginAiCompletion(deps: { load: () => Promise<AiConfigItem[]>; discover?: (config: AiConfigItem) => Promise<{ id: string }[]>; complete: (request: AiCompletionRequest) => Promise<string>; confirm: (pluginName: string, model: PluginAiModel) => Promise<boolean> }) {
+export function createPluginAiCompletion(deps: {
+  load: () => Promise<AiConfigItem[]>;
+  discover?: (config: AiConfigItem) => Promise<{ id: string }[]>;
+  complete: (request: AiCompletionRequest) => Promise<string>;
+  confirm: (pluginName: string, model: PluginAiModel, preview: PluginAiPromptPreview) => Promise<PluginAiConfirmDecision>;
+}) {
   let busy = false;
+  /**
+   * Workbench-session consent memory (E2): once the user answers "don't ask
+   * again in this workbench" on an allow, later generations skip the prompt.
+   * In-memory only — it lives with this completion instance (one per
+   * workbench host), never touches disk, and a fresh workbench asks again.
+   * The very first generation of a session always asks.
+   */
+  let confirmationExempt = false;
   return {
     async listAiProviders() {
       return (await deps.load()).filter((c) => !isCliProvider(c.provider)).map((c) => ({ configId: c.id, name: c.name }));
@@ -60,7 +103,12 @@ export function createPluginAiCompletion(deps: { load: () => Promise<AiConfigIte
         const chosen = configs.find((c) => c.id === input.configId && !isCliProvider(c.provider));
         const model = chosen && input.model.trim() && input.model.length <= 256 ? { configId: chosen.id, name: chosen.name, model: input.model.trim(), isDefault: false } : undefined;
         if (!model) throw new Error("AI configuration or model is no longer available. Refresh the model list.");
-        if (!(await deps.confirm(pluginName, model))) throw new Error("AI generation cancelled.");
+        if (!confirmationExempt) {
+          const decision = await deps.confirm(pluginName, model, pluginAiPromptPreview(input.prompt));
+          const allowed = confirmAllowed(decision);
+          if (allowed && typeof decision === "object" && decision !== null && decision.remember === true) confirmationExempt = true;
+          if (!allowed) throw new Error("AI generation cancelled.");
+        }
         const config = configs.find((c) => c.id === model.configId)!;
         let result: string;
         try {
