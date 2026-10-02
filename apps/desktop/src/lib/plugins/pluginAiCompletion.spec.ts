@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createPluginAiCompletion, PLUGIN_AI_TASK_SYSTEM_PROMPTS, pluginAiModels, pluginAiPromptPreview } from "./pluginAiCompletion";
+import type { AiCompletionRequest, AiStreamChunk } from "@/lib/backend/tauri";
 import type { AiConfigItem } from "@/types/ai";
 const config = { id: "one", name: "My AI", provider: "openai", authMethod: "api-key", apiStyle: "completions", model: "a", models: [{ name: "b" }], apiKey: "secret", endpoint: "private", customHeaders: { token: "secret" }, isDefault: true } as AiConfigItem;
 describe("plugin text completion", () => {
@@ -106,5 +107,76 @@ describe("plugin text completion", () => {
     expect(complete.mock.calls[2][0].systemPrompt).toContain(PLUGIN_AI_TASK_SYSTEM_PROMPTS.rewrite);
     await api.generateAiText("Plugin", { configId: "one", model: "a", prompt: "categorize", task: "classify" });
     expect(complete.mock.calls[3][0].systemPrompt).toContain(PLUGIN_AI_TASK_SYSTEM_PROMPTS.classify);
+  });
+  it("streams deltas, resolves the full text and delivers done last", async () => {
+    const chunks: { delta: string; done: boolean }[] = [];
+    let streamSessionId = "";
+    let finish!: () => void;
+    const stream = vi.fn((sessionId: string, _request: AiCompletionRequest, onChunk: (chunk: AiStreamChunk) => void) => {
+      streamSessionId = sessionId;
+      onChunk({ session_id: sessionId, delta: "ls ", done: false });
+      onChunk({ session_id: sessionId, delta: "-la", done: false });
+      return new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+    });
+    const api = createPluginAiCompletion({ load: async () => [config], complete: vi.fn(), confirm: async () => true, stream, cancel: async () => true });
+    const pending = api.generateAiTextStream("Plugin", { configId: "one", model: "a", prompt: "hi", requestId: "gen-1" }, (chunk) => chunks.push(chunk));
+    // Streaming shares the plain generation's busy lock.
+    await expect(api.generateAiText("Plugin", { configId: "one", model: "a", prompt: "hi" })).rejects.toThrow("already generating");
+    finish();
+    await expect(pending).resolves.toBe("ls -la");
+    expect(chunks).toEqual([
+      { delta: "ls ", done: false },
+      { delta: "-la", done: false },
+      { delta: "", done: true },
+    ]);
+    // Cancel reports false once the stream is finished.
+    await expect(api.cancelAiGeneration("gen-1")).resolves.toBe(false);
+    expect(streamSessionId).toBeTruthy();
+  });
+  it("consents before streaming and sanitizes empty and provider failures", async () => {
+    const confirm = vi.fn().mockResolvedValue(false);
+    const stream = vi.fn();
+    const api = createPluginAiCompletion({ load: async () => [config], complete: vi.fn(), confirm, stream, cancel: async () => true });
+    await expect(api.generateAiTextStream("Plugin", { configId: "one", model: "a", prompt: "hi", requestId: "gen-1" }, () => undefined)).rejects.toThrow("cancelled");
+    expect(stream).not.toHaveBeenCalled();
+    const okApi = createPluginAiCompletion({ load: async () => [config], complete: vi.fn(), confirm: async () => true, stream: vi.fn(() => Promise.resolve()), cancel: async () => true });
+    await expect(okApi.generateAiTextStream("Plugin", { configId: "one", model: "a", prompt: "hi", requestId: "gen-1" }, () => undefined)).rejects.toThrow("empty");
+    const failApi = createPluginAiCompletion({
+      load: async () => [config],
+      complete: vi.fn(),
+      confirm: async () => true,
+      stream: vi.fn((_sessionId: string, _request: AiCompletionRequest, onChunk: (chunk: AiStreamChunk) => void) => {
+        onChunk({ session_id: "s", delta: "partial", done: false });
+        return Promise.reject(new Error("secret endpoint"));
+      }),
+      cancel: async () => true,
+    });
+    await expect(failApi.generateAiTextStream("Plugin", { configId: "one", model: "a", prompt: "hi", requestId: "gen-1" }, () => undefined)).rejects.toThrow("AI generation failed");
+  });
+  it("cancels an active stream by requestId and rejects the request as cancelled", async () => {
+    let streamSessionId = "";
+    let fail!: (error: Error) => void;
+    const stream = vi.fn((sessionId: string, _request: AiCompletionRequest, _onChunk: (chunk: AiStreamChunk) => void) => {
+      streamSessionId = sessionId;
+      return new Promise<void>((_resolve, reject) => {
+        fail = reject;
+      });
+    });
+    const cancel = vi.fn(async (sessionId: string) => sessionId === streamSessionId);
+    const api = createPluginAiCompletion({ load: async () => [config], complete: vi.fn(), confirm: async () => true, stream, cancel });
+    const pending = api.generateAiTextStream("Plugin", { configId: "one", model: "a", prompt: "hi", requestId: "gen-1" }, () => undefined);
+    await vi.waitFor(() => expect(streamSessionId).toBeTruthy());
+    await expect(api.cancelAiGeneration("gen-1")).resolves.toBe(true);
+    fail(new Error("Agent loop cancelled"));
+    await expect(pending).rejects.toThrow("cancelled");
+    expect(await api.cancelAiGeneration("gen-1")).toBe(false);
+    expect(await api.cancelAiGeneration("never-started")).toBe(false);
+  });
+  it("refuses streaming on hosts without the desktop pipeline", async () => {
+    const api = createPluginAiCompletion({ load: async () => [config], complete: vi.fn(), confirm: async () => true });
+    await expect(api.generateAiTextStream("Plugin", { configId: "one", model: "a", prompt: "hi", requestId: "gen-1" }, () => undefined)).rejects.toThrow("streaming is unavailable");
+    await expect(api.cancelAiGeneration("gen-1")).resolves.toBe(false);
   });
 });

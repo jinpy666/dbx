@@ -106,6 +106,17 @@ const aiCompletion = createPluginAiCompletion({
   load: () => import("@/lib/backend/tauri").then((api) => api.loadAiConfigs()),
   discover: (config) => import("@/lib/backend/tauri").then((api) => api.aiListModels(config)),
   complete: (request) => import("@/lib/backend/tauri").then((api) => api.aiComplete(request)),
+  // E1: ride the desktop streaming pipeline (ai_stream + per-session cancel
+  // registry). Only wired here, so the bridge advertises aiCompletionStream
+  // on desktop hosts and leaves it off elsewhere.
+  stream: async (sessionId, request, onChunk) => {
+    const { aiStream } = await tauriFileApi();
+    await aiStream(sessionId, request, onChunk);
+  },
+  cancel: async (sessionId) => {
+    const { aiCancelStream } = await tauriFileApi();
+    return await aiCancelStream(sessionId);
+  },
   confirm: async (pluginName, model, preview) => {
     const zh = appLocale.value.startsWith("zh");
     const message = zh ? `插件「${pluginName}」将把准备的文本发送给「${model.name} / ${model.model}」，并读取生成结果。` : `Plugin "${pluginName}" will send its prepared text to "${model.name} / ${model.model}" and receive the generated result.`;
