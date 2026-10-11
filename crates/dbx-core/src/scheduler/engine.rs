@@ -112,13 +112,10 @@ impl SchedulerEngine {
         &self.queue
     }
 
-    /// Full worker lifecycle: recover → acquire lease → poll loop → graceful
+    /// Full worker lifecycle: acquire lease → recover → poll loop → graceful
     /// shutdown. Returns when `shutdown` fires; never panics on provider or
     /// store errors (per-tick/per-run failures are logged and isolated).
     pub async fn run(self: Arc<Self>, shutdown: CancellationToken) {
-        if let Err(error) = self.store.recover().await {
-            log::error!("[scheduler] recovery failed: {error}");
-        }
         let mut lease = None;
         while lease.is_none() && !shutdown.is_cancelled() {
             match LeaseGuard::acquire(&self.store, &self.lease_name, &self.worker_id, self.lease_ttl).await {
@@ -133,8 +130,17 @@ impl SchedulerEngine {
             }
         }
         let Some(lease) = lease else { return };
+        // Recovery happens ONLY under the lease: `recover()` rewrites every
+        // starting/running row regardless of owner, so a worker that lost the
+        // acquisition race must not run it — it would fail the live holder's
+        // in-flight runs while that holder is still working (desktop takeover
+        // waits 20s against a 90s old-engine grace, so overlaps are real).
         if let Err(error) = lease.recover().await {
-            log::error!("[scheduler] recovery failed: {error}");
+            // A failed recovery leaves orphaned rows undefined; refusing to
+            // schedule is safer than acting on a half-recovered store.
+            log::error!("[scheduler] recovery failed, not starting: {error}");
+            lease.release().await;
+            return;
         }
         self.enqueue_startup_runs().await;
         log::info!("[scheduler] worker {} took over the scheduler lease", self.worker_id);
@@ -168,30 +174,53 @@ impl SchedulerEngine {
             });
         }
         loop {
-            tokio::select! {
-                _ = shutdown.cancelled() => break,
-                _ = wakeups.notified() => self.beat(&lease).await,
-                _ = tokio::time::sleep(self.poll_interval) => self.beat(&lease).await,
+            let lease_lost = tokio::select! {
+                _ = shutdown.cancelled() => {
+                    log::info!("[scheduler] worker {} shutting down", self.worker_id);
+                    self.queue.drain().await;
+                    self.shutdown_residents().await;
+                    if let Err(error) = self.store.cancel_queued_runs().await {
+                        log::warn!("[scheduler] cannot cancel queued runs during shutdown: {error}");
+                    }
+                    lease.release().await;
+                    return;
+                }
+                _ = wakeups.notified() => !self.beat(&lease).await,
+                _ = tokio::time::sleep(self.poll_interval) => !self.beat(&lease).await,
+            };
+            if lease_lost {
+                // Takeover: the new holder owns recovery, queued runs and
+                // supervision from here on. Detach without touching shared
+                // rows — settle only this process's own in-flight work and
+                // plugin sessions; release is a no-op unless we still hold
+                // the lease. Canceling queued runs here would fight the new
+                // holder (they are its first claims).
+                log::warn!("[scheduler] worker {} lost the scheduler lease; detaching", self.worker_id);
+                self.queue.drain().await;
+                self.shutdown_residents().await;
+                lease.release().await;
+                return;
             }
         }
-        log::info!("[scheduler] worker {} shutting down", self.worker_id);
-        self.queue.drain().await;
-        self.shutdown_residents().await;
-        if let Err(error) = self.store.cancel_queued_runs().await {
-            log::warn!("[scheduler] cannot cancel queued runs during shutdown: {error}");
-        }
-        lease.release().await;
     }
 
     /// One loop pass (poll tick or wake nudge): renew the lease, then run
-    /// the scheduling pass.
-    async fn beat(self: &Arc<Self>, lease: &LeaseGuard) {
-        if let Err(error) = lease.heartbeat().await {
-            log::warn!("[scheduler] lease heartbeat failed: {error}");
+    /// the scheduling pass. Returns `false` when the lease was lost — the
+    /// caller must stop scheduling; `tick` claims by worker id only, so
+    /// continuing after a takeover would steal the new holder's work.
+    async fn beat(self: &Arc<Self>, lease: &LeaseGuard) -> bool {
+        match lease.heartbeat().await {
+            Ok(true) => {}
+            Ok(false) => {
+                log::warn!("[scheduler] scheduler lease was taken over; stopping scheduling");
+                return false;
+            }
+            Err(error) => log::warn!("[scheduler] lease heartbeat failed (will retry): {error}"),
         }
         if let Err(error) = self.tick().await {
             log::error!("[scheduler] scheduler tick failed: {error}");
         }
+        true
     }
 
     /// One scheduling pass. Public so tests and embedders can drive the loop

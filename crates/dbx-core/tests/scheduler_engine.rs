@@ -454,3 +454,112 @@ async fn a_successful_probe_refreshes_the_session_heartbeat() {
     assert!(age.num_seconds() < 30, "heartbeat must be refreshed by the probe, aged {age}");
     let _ = run;
 }
+
+// Regression (review round 2, issue 1): a worker that has NOT acquired the
+// lease must not run recovery on entry — `recover()` rewrites every
+// starting/running row regardless of owner, so the old pre-lease call let a
+// losing competitor fail the live holder's in-flight run (desktop takeover
+// waits 20s against a 90s old-engine grace, so overlapping workers are real).
+#[tokio::test]
+async fn competitor_engine_never_recovers_while_the_lease_is_held() {
+    let (_dir, store) = temp_store();
+    let registry = registry_with(TestExecutor::new(Behavior::WaitCancelled));
+
+    // worker-1 holds the lease and has a run in flight.
+    let guard = LeaseGuard::acquire(&store, SCHEDULER_LEASE, "worker-1", Duration::from_secs(30))
+        .await
+        .unwrap()
+        .expect("holder takes the lease");
+    save(&store, run_definition("t1", "dbx.test", TaskTrigger::Manual)).await;
+    let run = store.enqueue_manual("t1".into()).await.unwrap();
+    // The holder's dispatch: claim (queued→starting) then mark running — the
+    // same invariant the engine's execute path upholds.
+    let claimed = store.claim("worker-1".into(), chrono::Utc::now()).await.unwrap().expect("holder claims its run");
+    assert_eq!(claimed.run.id, run.id);
+    store.mark_run_started(run.id.clone(), "worker-1".into()).await.unwrap();
+
+    // Competitor: the old code recover()d before the lease loop and flipped
+    // the holder's running row to failed/worker_interrupted right here.
+    let engine = Arc::new(
+        dbx_core::scheduler::SchedulerEngine::new(store.clone(), registry, "worker-2", Duration::from_millis(10))
+            .with_lease_ttl(Duration::from_millis(100)),
+    );
+    let shutdown = CancellationToken::new();
+    let handle = {
+        let engine = engine.clone();
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move { engine.run(shutdown).await })
+    };
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let current = store.get_run(run.id.clone()).await.unwrap();
+    assert_eq!(
+        current.status,
+        TaskRunStatus::Running,
+        "a competitor without the lease must not fail the holder's active run"
+    );
+    assert_eq!(current.worker_id.as_deref(), Some("worker-1"), "the run must keep its owner");
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(5), handle).await.expect("competitor shuts down").unwrap();
+    let after = store.get_run(run.id).await.unwrap();
+    assert_eq!(
+        after.status,
+        TaskRunStatus::Running,
+        "shutdown of a never-leased worker must not touch the holder's run either"
+    );
+    guard.release().await;
+}
+
+// Regression (review round 2, issue 2): a worker whose lease was taken over
+// must stop scheduling. `beat()` treats heartbeat `Ok(false)` as the end of
+// its loop; the detached worker leaves queued runs for the new holder
+// (canceling them would fight the takeover) and its run() returns.
+#[tokio::test]
+async fn engine_detaches_after_its_lease_is_taken_over() {
+    let (_dir, store) = temp_store();
+    let registry = registry_with(TestExecutor::new(Behavior::Succeed));
+    save(&store, run_definition("t1", "dbx.test", TaskTrigger::Manual)).await;
+
+    // worker-1 holds the lease with a poll interval far longer than the TTL:
+    // it cannot renew before the lease expires and stays expired long enough
+    // for worker-2 to take over deterministically.
+    let engine1 = Arc::new(
+        dbx_core::scheduler::SchedulerEngine::new(
+            store.clone(),
+            registry.clone(),
+            "worker-1",
+            Duration::from_millis(1000),
+        )
+        .with_lease_ttl(Duration::from_millis(100)),
+    );
+    let shutdown1 = CancellationToken::new();
+    let handle1 = {
+        let engine = engine1.clone();
+        let shutdown = shutdown1.clone();
+        tokio::spawn(async move { engine.run(shutdown).await })
+    };
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    // worker-2 takes the EXPIRED lease (100ms TTL vs the 250ms sleep) and
+    // consumes the queued work.
+    let guard2 = LeaseGuard::acquire(&store, SCHEDULER_LEASE, "worker-2", Duration::from_secs(30))
+        .await
+        .unwrap()
+        .expect("worker-2 takes the expired lease");
+    let run2 = store.enqueue_manual("t1".into()).await.unwrap();
+    let engine2 = engine(&store, registry, "worker-2");
+    let finished = drive_until_terminal(&engine2, &store, &run2.id, &[TaskRunStatus::Success]).await;
+    assert_eq!(finished.status, TaskRunStatus::Success);
+    assert_eq!(finished.worker_id.as_deref(), Some("worker-2"), "the new holder owns the work after takeover");
+
+    // worker-1's next beat observes the takeover and detaches — without the
+    // shutdown token firing (this is the lease-lost path, not a shutdown).
+    let detached = tokio::time::timeout(Duration::from_secs(5), handle1)
+        .await
+        .expect("worker-1 must stop scheduling after losing the lease");
+    assert!(detached.is_ok());
+    assert!(!shutdown1.is_cancelled(), "detachment must be the lease-lost path, not shutdown");
+    // The new holder's finished run was not cancelled by worker-1's exit.
+    assert_eq!(store.get_run(run2.id).await.unwrap().status, TaskRunStatus::Success);
+    guard2.release().await;
+}

@@ -56,11 +56,12 @@ pub fn router() -> Router<Arc<WebState>> {
         .route("/scheduler/events", get(scheduler_events))
 }
 
-/// Builds the service for one request. The web layer does not own providers
-/// yet (builtin/plugin executors are registered by the host worker, A4/A8),
-/// so an empty registry reports `provider_not_found` until they are wired.
+/// Builds the service for one request. The registry is the SAME instance the
+/// in-process engine consumes (see `main`): task validation and run dispatch
+/// must resolve providers identically on both sides, or the API would enqueue
+/// work nothing can execute.
 fn service(state: &WebState) -> SchedulerService {
-    service_with(&state.data_dir, Arc::new(TaskExecutorRegistry::new()))
+    service_with(&state.data_dir, state.scheduler_registry.clone())
 }
 
 pub(crate) fn service_with(data_dir: &std::path::Path, registry: Arc<TaskExecutorRegistry>) -> SchedulerService {
@@ -427,6 +428,26 @@ mod tests {
     async fn test_state(data_dir: &Path) -> Arc<WebState> {
         let storage = dbx_core::persistence::test_storage::open(&data_dir.join("dbx.db")).await.unwrap();
         Arc::new(WebState::for_tests(Arc::new(dbx_core::connection::AppState::new(storage)), data_dir.to_path_buf()))
+    }
+
+    /// The routes and the engine must resolve providers identically: this test
+    /// executor rides the same shared registry the HTTP layer validates against.
+    #[derive(Default)]
+    struct SucceedExecutor;
+
+    #[async_trait::async_trait]
+    impl dbx_core::scheduler::TaskExecutor for SucceedExecutor {
+        async fn validate(&self, _task: &TaskDefinition) -> Result<(), dbx_core::scheduler::TaskError> {
+            Ok(())
+        }
+
+        async fn execute(
+            &self,
+            mut context: dbx_core::scheduler::TaskExecutionContext,
+        ) -> Result<dbx_core::scheduler::TaskExecutionResult, dbx_core::scheduler::TaskError> {
+            let _ = context.logger.system("web registry test run");
+            Ok(dbx_core::scheduler::TaskExecutionResult { success: true, ..Default::default() })
+        }
     }
 
     fn manual_task(name: &str) -> TaskDefinition {
@@ -1083,5 +1104,51 @@ mod tests {
                 break;
             }
         }
+    }
+
+    // Regression (review round 2, issue 3): the web service runs its engine
+    // in-process on the SAME shared registry these routes use. A run created
+    // over HTTP must therefore reach a terminal state once the engine ticks —
+    // it used to sit `queued` forever with an empty registry and no engine.
+    #[tokio::test]
+    async fn http_run_reaches_a_terminal_state_through_the_shared_registry() {
+        let directory = tempfile::tempdir().unwrap();
+        let registry = Arc::new(dbx_core::scheduler::TaskExecutorRegistry::new());
+        registry.register_run("web-test", Arc::new(SucceedExecutor));
+        let storage = dbx_core::persistence::test_storage::open(&directory.path().join("dbx.db")).await.unwrap();
+        let state = Arc::new(WebState::for_tests_with_registry(
+            Arc::new(dbx_core::connection::AppState::new(storage)),
+            directory.path().to_path_buf(),
+            registry.clone(),
+        ));
+
+        let mut task = manual_task("web engine round trip");
+        task.provider_id = "web-test".to_owned();
+        let Json(created) = create_task(State(state.clone()), Json(task)).await.unwrap();
+        let Json(run) = run_task(State(state.clone()), Path(created.id.clone())).await.unwrap();
+        assert_eq!(run.status, TaskRunStatus::Queued, "the run is accepted into the queue");
+
+        // The engine main.rs spawns consumes the SAME store directory and
+        // registry the routes use; tick it like the poll loop would.
+        let engine = Arc::new(dbx_core::scheduler::SchedulerEngine::new(
+            dbx_core::scheduler::SchedulerStore::new(directory.path()),
+            registry,
+            "web-test-worker".to_owned(),
+            std::time::Duration::from_millis(20),
+        ));
+        let mut terminal = None;
+        for _ in 0..300 {
+            engine.tick().await.expect("engine tick");
+            if let Ok(current) = get_run(State(state.clone()), Path(run.id.clone())).await {
+                if current.0.status.is_terminal() {
+                    terminal = Some(current.0);
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let finished = terminal.expect("run must reach a terminal state");
+        assert_eq!(finished.status, TaskRunStatus::Success, "the shared registry executed the run");
+        assert_eq!(finished.worker_id.as_deref(), Some("web-test-worker"));
     }
 }
