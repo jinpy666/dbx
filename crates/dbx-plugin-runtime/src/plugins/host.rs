@@ -583,7 +583,15 @@ fn validate_plugin_connection_values_for_action(
         // untouched optional fields); it must not fail the declared type check.
         if let Some(value) = value.filter(|value| !value.is_null()) {
             validate_plugin_field_type(field, &value)?;
+            // Port range is condition-aware like required enforcement: the
+            // host stores 0 for connections whose protocol has no port at all
+            // (endpoint-based backends), while a plugin may declare its
+            // port-bound field only for the protocols that speak host/port
+            // (visible_when). Hiding the field means "port not in play" — the
+            // stored 0 must not fail the range check; a visible port field
+            // with 0 is still rejected (the user skipped a required input).
             if field.effective_binding() == PluginFormFieldBinding::Port
+                && plugin_field_is_visible(field, config, provider)
                 && value.as_u64().is_none_or(|port| port == 0 || port > u16::MAX as u64)
             {
                 return Err(format!("Plugin connection field '{}' must be a port between 1 and 65535", field.label));
@@ -1225,6 +1233,67 @@ mod tests {
         .unwrap();
 
         assert!(validate_plugin_connection_values(&config, &provider)
+            .unwrap_err()
+            .contains("port between 1 and 65535"));
+    }
+
+    /// Mirrors the files plugin manifest shape: the port-bound field is only
+    /// visible for the tunnel protocols (`visible_when` on the protocol
+    /// select). Endpoint-based protocols keep the host's port 0 sentinel —
+    /// the hidden port field must not fail the range check, while the same
+    /// 0 on a visible (tunnel) port field is still a missing required input.
+    #[test]
+    fn zero_port_tolerated_when_port_field_hidden_by_condition() {
+        let provider: PluginConnectionProviderContribution = serde_json::from_value(serde_json::json!({
+            "id": "sample.connection",
+            "label": "Sample",
+            "database_type": "sample",
+            "fields": [
+                {
+                    "key": "protocol",
+                    "label": "Protocol",
+                    "type": "select",
+                    "binding": "config",
+                    "required": true,
+                    "default": "fs",
+                    "options": [
+                        { "value": "fs", "label": "fs" },
+                        { "value": "sftp", "label": "sftp" }
+                    ]
+                },
+                {
+                    "key": "port",
+                    "label": "Port",
+                    "type": "number",
+                    "binding": "port",
+                    "visible_when": { "field": "protocol", "one_of": ["sftp"] },
+                    "required_when": { "field": "protocol", "one_of": ["sftp"] }
+                }
+            ]
+        }))
+        .unwrap();
+        let config_for = |protocol: &str| -> ConnectionConfig {
+            serde_json::from_value(serde_json::json!({
+                "id": "plugin-connection",
+                "name": "Plugin connection",
+                "db_type": "plugin",
+                "host": "localhost",
+                "port": 0,
+                "username": "",
+                "password": "",
+                "database": null,
+                "plugin_id": "sample",
+                "plugin_connection_provider": "sample.connection",
+                "plugin_connection_type": "sample",
+                "external_config": { "protocol": protocol }
+            }))
+            .unwrap()
+        };
+
+        // fs: port field hidden → stored port 0 accepted.
+        assert!(validate_plugin_connection_values(&config_for("fs"), &provider).is_ok());
+        // sftp: port field visible → 0 is still out of range.
+        assert!(validate_plugin_connection_values(&config_for("sftp"), &provider)
             .unwrap_err()
             .contains("port between 1 and 65535"));
     }
