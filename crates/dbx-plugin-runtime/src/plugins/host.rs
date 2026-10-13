@@ -564,6 +564,19 @@ fn validate_plugin_connection_values_for_action(
             return Err(format!("Connection secret '{key}' is not declared by provider '{}'", provider.id));
         }
     }
+    // Legacy address shape: connections saved before a plugin moved its
+    // address into the host-level host/port bindings keep the full service
+    // address in their config `endpoint` (the plugin backend still prefers a
+    // stored endpoint over the synthesized one). Such connections must not be
+    // retroactively rejected as missing required host/port input — the
+    // bindings exist so the host can attach transport layers, and they are
+    // only authoritative when no endpoint carries the address instead.
+    let endpoint_fallback = config
+        .external_config
+        .as_ref()
+        .and_then(|values| values.get("endpoint"))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|endpoint| !endpoint.trim().is_empty());
     for field in &provider.fields {
         let value = plugin_connection_field_value(config, field);
         // Required enforcement is condition-aware (Host API 1.1): fields hidden
@@ -576,6 +589,11 @@ fn validate_plugin_connection_values_for_action(
             && plugin_field_is_visible(field, config, provider)
             && plugin_field_is_required(field, config, provider)
             && plugin_field_value_is_empty(value.as_ref())
+            && !(endpoint_fallback
+                && matches!(
+                    field.effective_binding(),
+                    PluginFormFieldBinding::Host | PluginFormFieldBinding::Port
+                ))
         {
             return Err(format!("Plugin connection field '{}' is required", field.label));
         }
@@ -592,6 +610,7 @@ fn validate_plugin_connection_values_for_action(
             // with 0 is still rejected (the user skipped a required input).
             if field.effective_binding() == PluginFormFieldBinding::Port
                 && plugin_field_is_visible(field, config, provider)
+                && !endpoint_fallback
                 && value.as_u64().is_none_or(|port| port == 0 || port > u16::MAX as u64)
             {
                 return Err(format!("Plugin connection field '{}' must be a port between 1 and 65535", field.label));
@@ -1296,6 +1315,97 @@ mod tests {
         assert!(validate_plugin_connection_values(&config_for("sftp"), &provider)
             .unwrap_err()
             .contains("port between 1 and 65535"));
+    }
+
+    /// Legacy address shape: connections stored before the plugin moved
+    /// webdav/ftp/sftp/... onto the host-level host/port bindings carry the
+    /// full service address in their config `endpoint` and keep the host's
+    /// empty-host/port-0 sentinels. The condition-gated host/port fields are
+    /// visible for those protocols, so without the endpoint fallback the
+    /// required check rejects every pre-migration connection ("Host is
+    /// required"). With the endpoint present the bindings are advisory —
+    /// while an emptied endpoint on the new shape still demands host/port.
+    #[test]
+    fn legacy_endpoint_connections_pass_condition_gated_host_port_bindings() {
+        let provider: PluginConnectionProviderContribution = serde_json::from_value(serde_json::json!({
+            "id": "sample.connection",
+            "label": "Sample",
+            "database_type": "sample",
+            "fields": [
+                {
+                    "key": "protocol",
+                    "label": "Protocol",
+                    "type": "select",
+                    "binding": "config",
+                    "required": true,
+                    "default": "fs",
+                    "options": [
+                        { "value": "fs", "label": "fs" },
+                        { "value": "webdav", "label": "webdav" }
+                    ]
+                },
+                {
+                    "key": "endpoint",
+                    "label": "Endpoint",
+                    "type": "text",
+                    "binding": "config"
+                },
+                {
+                    "key": "host",
+                    "label": "Host",
+                    "type": "text",
+                    "binding": "host",
+                    "visible_when": { "field": "protocol", "one_of": ["webdav"] },
+                    "required_when": { "field": "protocol", "one_of": ["webdav"] }
+                },
+                {
+                    "key": "port",
+                    "label": "Port",
+                    "type": "number",
+                    "binding": "port",
+                    "visible_when": { "field": "protocol", "one_of": ["webdav"] },
+                    "required_when": { "field": "protocol", "one_of": ["webdav"] }
+                }
+            ]
+        }))
+        .unwrap();
+        let config_for = |external: serde_json::Value| -> ConnectionConfig {
+            serde_json::from_value(serde_json::json!({
+                "id": "plugin-connection",
+                "name": "Plugin connection",
+                "db_type": "plugin",
+                "host": "",
+                "port": 0,
+                "username": "",
+                "password": "",
+                "database": null,
+                "plugin_id": "sample",
+                "plugin_connection_provider": "sample.connection",
+                "plugin_connection_type": "sample",
+                "external_config": external
+            }))
+            .unwrap()
+        };
+
+        // Pre-migration webdav: address lives in endpoint, host/port sentinels.
+        assert!(validate_plugin_connection_values(
+            &config_for(serde_json::json!({ "protocol": "webdav", "endpoint": "http://nas:5006/dav" })),
+            &provider
+        )
+        .is_ok());
+        // New shape without host/port: an emptied endpoint no longer covers
+        // the address, so the visible host field is still demanded.
+        assert!(validate_plugin_connection_values(
+            &config_for(serde_json::json!({ "protocol": "webdav", "endpoint": "" })),
+            &provider
+        )
+        .unwrap_err()
+        .contains("field 'Host' is required"));
+        // New shape with host/port filled: passes without an endpoint.
+        let mut migrated = config_for(serde_json::json!({ "protocol": "webdav" }));
+        migrated.host = "nas".to_string();
+        migrated.port = 5006;
+        assert!(validate_plugin_connection_values(&migrated, &provider).is_ok());
     }
 
     #[test]
