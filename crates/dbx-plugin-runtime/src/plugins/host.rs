@@ -90,11 +90,13 @@ impl PluginConnectionHandle {
     }
 }
 
+type ConnectionLifecycleTable = HashMap<(String, String), Weak<Mutex<u64>>>;
+
 struct PluginHostInner {
     registry: PluginRegistry,
     sessions: RwLock<HashMap<String, Arc<PluginSidecarSession>>>,
     activation_lock: Mutex<()>,
-    connection_lifecycles: StdMutex<HashMap<(String, String), Weak<Mutex<u64>>>>,
+    connection_lifecycles: StdMutex<ConnectionLifecycleTable>,
     events: broadcast::Sender<PluginEvent>,
     binary_messages: broadcast::Sender<PluginBinaryMessage>,
 }
