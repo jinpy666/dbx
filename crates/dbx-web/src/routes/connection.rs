@@ -502,7 +502,14 @@ pub async fn connect_db(
         config.db_type == DatabaseType::Nacos,
     );
 
-    app.remove_connection_pools_detached(&connection_id).await;
+    // Plugin connection/connect refreshes the sidecar's registration in place.
+    // Closing the old pool after this request would send a late
+    // connection/disconnect and remove the refreshed registration.
+    if config.db_type == DatabaseType::Plugin {
+        app.drop_connection_pools_without_close(&connection_id).await;
+    } else {
+        app.remove_connection_pools_detached(&connection_id).await;
+    }
     app.nacos_registry.drop_connection(&connection_id).await;
     app.reset_connection_transport_for_config(&connection_id, &runtime_config).await;
     app.configs.write().await.insert(connection_id.clone(), runtime_config);
@@ -1520,6 +1527,98 @@ mod tests {
         assert_eq!(error.message, "Plugin connection is missing plugin_id");
         assert!(state.app.with_connection_pools(|pools| !pools.contains_key("plugin-connect")).await);
 
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn plugin_reconnect_ignores_late_disconnect_from_old_pool() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (state, dir) = test_web_state().await;
+        let plugin_dir = dir.join("plugins/sample.reconnect");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("manifest.json"),
+            serde_json::json!({
+                "manifest_version": 1,
+                "id": "sample.reconnect",
+                "name": "Reconnect test",
+                "version": "1.0.0",
+                "publisher": "sample",
+                "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+                "entrypoints": { "backend": {
+                    "protocol_versions": [1],
+                    "transport": "stdio-jsonl",
+                    "executable": "plugin.sh"
+                } },
+                "contributions": [{
+                    "type": "connection-provider",
+                    "id": "sample.connection",
+                    "database_type": "sample",
+                    "capabilities": ["connect", "disconnect"]
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let script = plugin_dir.join("plugin.sh");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+IFS= read -r initialize
+initialize_id=$(printf '%s' "$initialize" | sed -E 's/.*"id":([0-9]+).*/\1/')
+printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1,"capabilities":["connections"],"plugin":{"id":"sample.reconnect","version":"1.0.0"}}}\n' "$initialize_id"
+while IFS= read -r request; do
+  request_id=$(printf '%s' "$request" | sed -E 's/.*"id":([0-9]+).*/\1/')
+  method=$(printf '%s' "$request" | sed -E 's/.*"method":"([^"]+)".*/\1/')
+  printf '%s\n' "$method" >> "$(dirname "$0")/events.log"
+  printf '{"jsonrpc":"2.0","id":%s,"result":{"success":true}}\n' "$request_id"
+done
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+
+        let mut config = plugin_config("plugin-reconnect");
+        config.host = "127.0.0.1".to_string();
+        config.plugin_id = Some("sample.reconnect".to_string());
+        config.plugin_connection_provider = Some("sample.connection".to_string());
+        config.plugin_connection_type = Some("sample".to_string());
+
+        let request = || ConnectRequest { config: config.clone(), client_attempt: None };
+        let _ = connect_db(State(state.clone()), HeaderMap::new(), Json(request())).await.unwrap();
+        let old_handle = match state.app.pool_handle(&config.id).await.unwrap() {
+            PoolKind::PluginConnection(handle) => handle,
+            _ => panic!("expected a plugin pool"),
+        };
+        let _ = connect_db(State(state.clone()), HeaderMap::new(), Json(request())).await.unwrap();
+        old_handle.disconnect().await.unwrap();
+        let events = std::fs::read_to_string(plugin_dir.join("events.log")).unwrap();
+        assert_eq!(events.lines().collect::<Vec<_>>(), ["connection/connect", "connection/connect"]);
+
+        let _ = disconnect_db(
+            State(state.clone()),
+            Json(DisconnectRequest { connection_id: config.id.clone(), client_attempt: None }),
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let events = std::fs::read_to_string(plugin_dir.join("events.log")).unwrap();
+                if events.lines().count() == 3 {
+                    assert_eq!(events.lines().last(), Some("connection/disconnect"));
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("explicit disconnect should reach the sidecar");
+        drop(old_handle);
+        state.app.plugin_host.stop("sample.reconnect").await.unwrap();
         let _ = std::fs::remove_dir_all(dir);
     }
 

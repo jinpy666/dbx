@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::Duration;
 
 use crate::models::connection::{ConnectionConfig, ConnectionTestResult, DatabaseType};
@@ -45,6 +45,8 @@ pub struct PluginConnectionHandle {
     session: Option<Arc<PluginSidecarSession>>,
     disconnect: bool,
     params: serde_json::Value,
+    lifecycle: Arc<Mutex<u64>>,
+    generation: u64,
     _activity: super::lifecycle::PluginUsageGuard,
 }
 
@@ -63,21 +65,28 @@ impl PluginConnectionHandle {
     }
 
     pub async fn disconnect(&self) -> Result<(), String> {
+        let mut generation = self.lifecycle.lock().await;
+        if *generation != self.generation {
+            return Ok(());
+        }
         let Some(session) = &self.session else {
             return Ok(());
         };
         if !self.disconnect || session.status().state != PluginSessionState::Running {
             return Ok(());
         }
-        let result: serde_json::Value = session
+        let result: Result<serde_json::Value, String> = session
             .invoke_with_timeout(
                 PLUGIN_CONNECTION_DISCONNECT_METHOD,
                 self.params.clone(),
                 None,
                 Some(super::PLUGIN_REQUEST_TIMEOUT),
             )
-            .await?;
-        ensure_plugin_operation_succeeded(result)
+            .await;
+        // A handle may have clones in the pool registry. Only one may send
+        // connection/disconnect, including when the request times out.
+        *generation = generation.wrapping_add(1);
+        ensure_plugin_operation_succeeded(result?)
     }
 }
 
@@ -85,6 +94,7 @@ struct PluginHostInner {
     registry: PluginRegistry,
     sessions: RwLock<HashMap<String, Arc<PluginSidecarSession>>>,
     activation_lock: Mutex<()>,
+    connection_lifecycles: StdMutex<HashMap<(String, String), Weak<Mutex<u64>>>>,
     events: broadcast::Sender<PluginEvent>,
     binary_messages: broadcast::Sender<PluginBinaryMessage>,
 }
@@ -98,10 +108,23 @@ impl PluginHost {
                 registry,
                 sessions: RwLock::new(HashMap::new()),
                 activation_lock: Mutex::new(()),
+                connection_lifecycles: StdMutex::new(HashMap::new()),
                 events,
                 binary_messages,
             }),
         }
+    }
+
+    fn connection_lifecycle(&self, plugin_id: &str, connection_id: &str) -> Arc<Mutex<u64>> {
+        let mut lifecycles = self.inner.connection_lifecycles.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        lifecycles.retain(|_, lifecycle| lifecycle.strong_count() > 0);
+        let key = (plugin_id.to_string(), connection_id.to_string());
+        if let Some(lifecycle) = lifecycles.get(&key).and_then(Weak::upgrade) {
+            return lifecycle;
+        }
+        let lifecycle = Arc::new(Mutex::new(0));
+        lifecycles.insert(key, Arc::downgrade(&lifecycle));
+        lifecycle
     }
 
     pub fn subscribe_events(&self) -> broadcast::Receiver<PluginEvent> {
@@ -353,6 +376,10 @@ impl PluginHost {
             .begin_connection(config.plugin_id.as_deref().unwrap_or_default(), &config.name)?;
         let (_, provider) = self.resolve_connection_provider(config)?;
         validate_plugin_connection_values(config, &provider)?;
+        let lifecycle = self.connection_lifecycle(config.plugin_id.as_deref().unwrap_or_default(), &config.id);
+        // Keep connect and disconnect ordered even when a detached pool close
+        // races a reconnect. A new generation makes older handles inert.
+        let mut generation = lifecycle.lock().await;
         let params = plugin_connection_params(config, &provider, runtime_host, runtime_port, runtime_proxy.as_ref())?;
         let needs_session = provider.has_capability(PluginConnectionCapability::Connect)
             || provider.has_capability(PluginConnectionCapability::Disconnect);
@@ -375,6 +402,9 @@ impl PluginHost {
             }
         }
         let disconnect = provider.has_capability(PluginConnectionCapability::Disconnect);
+        *generation = generation.wrapping_add(1);
+        let handle_generation = *generation;
+        drop(generation);
         Ok(PluginConnectionHandle {
             plugin_id: config.plugin_id.clone().unwrap_or_default(),
             provider_id: provider.id,
@@ -382,6 +412,8 @@ impl PluginHost {
             session,
             disconnect,
             params,
+            lifecycle,
+            generation: handle_generation,
             _activity: activity,
         })
     }
