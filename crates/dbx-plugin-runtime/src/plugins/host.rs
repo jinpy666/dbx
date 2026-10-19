@@ -65,8 +65,9 @@ impl PluginConnectionHandle {
     }
 
     pub async fn disconnect(&self) -> Result<(), String> {
-        let mut generation = self.lifecycle.lock().await;
-        if *generation != self.generation {
+        // Fast-path filter: an already-retired handle never reaches the plugin.
+        // The detached worker re-checks under the lifecycle lock.
+        if *self.lifecycle.lock().await != self.generation {
             return Ok(());
         }
         let Some(session) = &self.session else {
@@ -75,19 +76,46 @@ impl PluginConnectionHandle {
         if !self.disconnect || session.status().state != PluginSessionState::Running {
             return Ok(());
         }
-        let result: Result<serde_json::Value, String> = session
-            .invoke_with_timeout(
-                PLUGIN_CONNECTION_DISCONNECT_METHOD,
-                self.params.clone(),
-                None,
-                Some(super::PLUGIN_REQUEST_TIMEOUT),
-            )
-            .await;
-        // A handle may have clones in the pool registry. Only one may send
-        // connection/disconnect, including when the request times out.
-        *generation = generation.wrapping_add(1);
-        ensure_plugin_operation_succeeded(result?)
+        // The RPC wait and the generation update run in a detached task that
+        // holds the lifecycle lock: a caller abandoned by a pool-close timeout
+        // must still retire this generation, and a later connect must wait for
+        // the in-flight disconnect to settle before re-registering.
+        let worker = tokio::spawn(disconnect_under_lifecycle(
+            self.lifecycle.clone(),
+            self.generation,
+            session.clone(),
+            self.params.clone(),
+            super::PLUGIN_REQUEST_TIMEOUT,
+        ));
+        worker.await.map_err(|error| format!("Plugin connection/disconnect worker failed: {error}"))?
     }
+}
+
+async fn disconnect_under_lifecycle(
+    lifecycle: Arc<Mutex<u64>>,
+    generation: u64,
+    session: Arc<PluginSidecarSession>,
+    params: serde_json::Value,
+    deadline: Duration,
+) -> Result<(), String> {
+    let mut current = lifecycle.lock().await;
+    if *current != generation {
+        return Ok(());
+    }
+    let result: Result<serde_json::Value, String> =
+        session.invoke_with_timeout(PLUGIN_CONNECTION_DISCONNECT_METHOD, params, None, Some(deadline)).await;
+    // A request that never got its answer may still be executing inside the
+    // plugin. Stop the sidecar so a reconnect starts from a fresh process
+    // instead of one whose registration the stale disconnect can clobber.
+    if result.as_ref().is_err_and(|error| super::runtime::request_may_still_execute(error)) {
+        log::warn!("connection/disconnect ended without confirmation; stopping the sidecar");
+        let _ = session.shutdown().await;
+    }
+    // A handle may have clones in the pool registry. Only one may send
+    // connection/disconnect, including when the caller is cancelled.
+    *current = current.wrapping_add(1);
+    drop(current);
+    result.and_then(ensure_plugin_operation_succeeded)
 }
 
 type ConnectionLifecycleTable = HashMap<(String, String), Weak<Mutex<u64>>>;
@@ -1790,5 +1818,85 @@ mod tests {
             &provider
         )
         .is_ok());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unconfirmed_disconnect_stops_the_sidecar_before_releasing_the_lifecycle() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::Arc;
+
+        use super::{disconnect_under_lifecycle, PluginHost, PluginSessionState};
+        use crate::plugins::PluginRegistry;
+
+        let temp = tempfile::tempdir().unwrap();
+        let plugin_dir = temp.path().join("plugins/sample.quarantine");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(
+            plugin_dir.join("manifest.json"),
+            serde_json::json!({
+                "manifest_version": 1,
+                "id": "sample.quarantine",
+                "name": "Quarantine test",
+                "version": "1.0.0",
+                "publisher": "sample",
+                "engines": { "dbx": ">=0.1.0", "host_api": "^1.0" },
+                "entrypoints": { "backend": {
+                    "protocol_versions": [1],
+                    "transport": "stdio-jsonl",
+                    "executable": "plugin.sh"
+                } },
+                "contributions": [{
+                    "type": "connection-provider",
+                    "id": "sample.connection",
+                    "database_type": "sample",
+                    "capabilities": ["connect", "disconnect"]
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let script = plugin_dir.join("plugin.sh");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+IFS= read -r initialize
+initialize_id=$(printf '%s' "$initialize" | sed -E 's/.*"id":([0-9]+).*/\1/')
+printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":1,"capabilities":["connections"],"plugin":{"id":"sample.quarantine","version":"1.0.0"}}}\n' "$initialize_id"
+# Never answer lifecycle requests: every disconnect stays unconfirmed.
+while IFS= read -r _; do :; done
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+
+        let registry = PluginRegistry::new_with_app_version(temp.path().join("plugins"), "0.5.67");
+        let host = PluginHost::new(registry);
+        let session = host.activate("sample.quarantine").await.unwrap();
+
+        // The timeout fires while the plugin is still executing the request;
+        // the sidecar must be quarantined before the lifecycle lock reopens,
+        // or a reconnect would reuse a session the stale disconnect clobbers.
+        let lifecycle = Arc::new(tokio::sync::Mutex::new(0u64));
+        let error = disconnect_under_lifecycle(
+            lifecycle.clone(),
+            0,
+            session.clone(),
+            serde_json::json!({}),
+            std::time::Duration::from_millis(500),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("timed out after"), "{error}");
+        assert_ne!(
+            session.status().state,
+            PluginSessionState::Running,
+            "an unconfirmed disconnect must stop the sidecar"
+        );
+        // A follow-up activate starts a fresh process with a clean state.
+        host.activate("sample.quarantine").await.unwrap();
+        host.stop("sample.quarantine").await.unwrap();
     }
 }
