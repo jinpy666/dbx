@@ -196,8 +196,16 @@ pub fn connection_selector_from(arguments: &Value) -> Option<&str> {
 /// into the rmcp wire type, degrading to a plain text payload for plugins
 /// that return something else.
 pub fn call_result_to_rmcp(value: Value) -> rmcp::model::CallToolResult {
-    use rmcp::model::{CallToolResult, ContentBlock};
-    if let Ok(result) = serde_json::from_value::<CallToolResult>(value.clone()) {
+    use rmcp::model::{CallToolResult, ContentBlock, ResultType};
+    if let Ok(mut result) = serde_json::from_value::<CallToolResult>(value.clone()) {
+        // Plugins predate `resultType`, so serde's default deserializes the
+        // field to `None` — and rmcp's modern-session handler only backfills
+        // cache hints, never this stamp. A modern client would then reject
+        // the whole result with "missing required resultType" whenever one
+        // of its requests races the negotiation and arrives without the
+        // per-request `_meta` marker. Stamp the spec default; rmcp strips it
+        // again for peers that negotiated an older revision.
+        result.result_type.get_or_insert(ResultType::COMPLETE);
         return result;
     }
     let text = if value.is_null() { "(the tool returned no output)".to_string() } else { value.to_string() };
@@ -356,5 +364,24 @@ mod tests {
         let fallback = call_result_to_rmcp(json!({ "unexpected": "shape" }));
         assert_eq!(fallback.content.len(), 1);
         assert_eq!(fallback.is_error, None);
+    }
+
+    #[test]
+    fn call_results_always_carry_the_modern_result_type_stamp() {
+        // Plugin answers predate `resultType`: serde fills `None` and rmcp's
+        // modern handler never backfills it, so the stamp must happen here.
+        let legacy_shaped = call_result_to_rmcp(json!({
+            "content": [{ "type": "text", "text": "done" }]
+        }));
+        assert_eq!(legacy_shaped.result_type, Some(rmcp::model::ResultType::COMPLETE));
+        // A plugin that already sends the field keeps its value.
+        let explicit = call_result_to_rmcp(json!({
+            "resultType": "complete",
+            "content": [{ "type": "text", "text": "done" }]
+        }));
+        assert_eq!(explicit.result_type, Some(rmcp::model::ResultType::COMPLETE));
+        // The text fallback path stamps too (`success()` default).
+        let fallback = call_result_to_rmcp(json!({ "unexpected": "shape" }));
+        assert_eq!(fallback.result_type, Some(rmcp::model::ResultType::COMPLETE));
     }
 }
