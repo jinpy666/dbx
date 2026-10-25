@@ -1,6 +1,6 @@
 import type { ColumnInfo, DatabaseType, IndexInfo, QueryTab } from "@/types/database";
 import * as api from "@/lib/backend/api";
-import { editableRowIdentifierColumns, physicalTablePrimaryKeys } from "@/lib/table/tableEditing";
+import { editableRowIdentifierColumns, physicalTablePrimaryKeys, uniqueKeyModelColumns } from "@/lib/table/tableEditing";
 import { loadVirtualRowIdentifier } from "@/lib/table/virtualRowIdentifier";
 import { createMetadataLoadTrace, logMetadataLoadTrace, MetadataLoadCoordinator, type MetadataLoadCacheStatus, type MetadataLoadTraceLogger } from "./metadataLoadCoordinator";
 import { metadataScopeKey, metadataScopeParts, type MetadataScopeInput } from "./metadataLoadScope";
@@ -15,6 +15,7 @@ export interface TableMetadata {
   tableType?: string;
   catalog?: string;
   database?: string;
+  databaseType?: DatabaseType;
   columns: ColumnInfo[];
   indexes: IndexInfo[];
   primaryKeys: string[];
@@ -34,6 +35,7 @@ export interface TableMetadataRequest {
   driverProfile?: string;
   catalog?: string;
   force?: boolean;
+  exactIdentity?: boolean;
   traceLogger?: MetadataLoadTraceLogger;
 }
 
@@ -158,7 +160,7 @@ function bumpTableMetadataInvalidationStamp(scopeKey: string): void {
   tableMetadataInvalidationStamps.set(scopeKey, (tableMetadataInvalidationStamps.get(scopeKey) ?? 0) + 1);
 }
 
-export function tableMetadataScope(request: Pick<TableMetadataRequest, "connectionId" | "database" | "schema" | "tableName" | "tableType" | "driverProfile" | "databaseType" | "catalog" | "currentSchema">): MetadataScopeInput {
+export function tableMetadataScope(request: Pick<TableMetadataRequest, "connectionId" | "database" | "schema" | "tableName" | "tableType" | "driverProfile" | "databaseType" | "catalog" | "currentSchema" | "exactIdentity">): MetadataScopeInput {
   return {
     kind: "table-metadata",
     connectionId: request.connectionId,
@@ -167,7 +169,7 @@ export function tableMetadataScope(request: Pick<TableMetadataRequest, "connecti
     tableName: request.tableName,
     tableType: request.tableType,
     driverProfile: request.driverProfile || request.databaseType,
-    extra: request.catalog || request.currentSchema ? { catalog: request.catalog, currentSchema: request.currentSchema } : undefined,
+    extra: request.catalog || request.currentSchema || request.exactIdentity ? { catalog: request.catalog, currentSchema: request.currentSchema, ...(request.exactIdentity ? { exactIdentity: true } : {}) } : undefined,
   };
 }
 
@@ -178,13 +180,13 @@ function withVirtualRowIdentifier(metadata: TableMetadata, request: Pick<TableMe
   return { ...metadata, primaryKeys: virtualPrimaryKeys, virtualPrimaryKeys, rowIdentityResolved: true };
 }
 
-export function getCachedTableMetadata(request: Pick<TableMetadataRequest, "connectionId" | "database" | "schema" | "tableName" | "tableType" | "driverProfile" | "databaseType" | "catalog" | "currentSchema">): TableMetadataLoadResult | undefined {
+export function getCachedTableMetadata(request: Pick<TableMetadataRequest, "connectionId" | "database" | "schema" | "tableName" | "tableType" | "driverProfile" | "databaseType" | "catalog" | "currentSchema" | "exactIdentity">): TableMetadataLoadResult | undefined {
   const hit = tableMetadataCache.get(tableMetadataScope(request));
   if (!hit) return undefined;
   return { metadata: withVirtualRowIdentifier(hit.value, request), cacheStatus: hit.stale ? "stale" : "hit", ageMs: hit.ageMs };
 }
 
-export function updateCachedTableMetadataType(request: Pick<TableMetadataRequest, "connectionId" | "database" | "schema" | "tableName" | "tableType" | "driverProfile" | "databaseType" | "catalog" | "currentSchema">, tableType: string): boolean {
+export function updateCachedTableMetadataType(request: Pick<TableMetadataRequest, "connectionId" | "database" | "schema" | "tableName" | "tableType" | "driverProfile" | "databaseType" | "catalog" | "currentSchema" | "exactIdentity">, tableType: string): boolean {
   const scope = tableMetadataScope(request);
   const hit = tableMetadataCache.get(scope);
   if (!hit) return false;
@@ -192,7 +194,7 @@ export function updateCachedTableMetadataType(request: Pick<TableMetadataRequest
   return true;
 }
 
-export function getCachedTableColumns(request: Pick<TableMetadataRequest, "connectionId" | "database" | "schema" | "tableName" | "tableType" | "driverProfile" | "databaseType" | "catalog" | "currentSchema">): TableColumnsLoadResult | undefined {
+export function getCachedTableColumns(request: Pick<TableMetadataRequest, "connectionId" | "database" | "schema" | "tableName" | "tableType" | "driverProfile" | "databaseType" | "catalog" | "currentSchema" | "exactIdentity">): TableColumnsLoadResult | undefined {
   const hit = tableColumnsCache.get(tableMetadataScope(request));
   if (!hit) return undefined;
   return { columns: hit.value.columns, tableType: hit.value.tableType, cacheStatus: hit.stale ? "stale" : "hit", ageMs: hit.ageMs, cachedAt: hit.cachedAt };
@@ -249,9 +251,11 @@ export async function loadTableColumns(request: TableMetadataRequest): Promise<T
       scope,
       async () => {
         // Display-only loader: columns only, never index discovery.
-        const columns = request.currentSchema
-          ? await api.getColumns(request.connectionId, request.database, request.schema ?? "", request.tableName, request.catalog, undefined, request.currentSchema)
-          : await api.getColumns(request.connectionId, request.database, request.schema ?? "", request.tableName, request.catalog);
+        const columns = request.exactIdentity
+          ? await api.getColumns(request.connectionId, request.database, request.schema ?? "", request.tableName, request.catalog, undefined, undefined, true)
+          : request.currentSchema
+            ? await api.getColumns(request.connectionId, request.database, request.schema ?? "", request.tableName, request.catalog, undefined, request.currentSchema)
+            : await api.getColumns(request.connectionId, request.database, request.schema ?? "", request.tableName, request.catalog);
         const resolvedTarget = columns.find((column) => column.resolved_table);
         const resolvedSchema = (request.databaseType === "vastbase" || request.databaseType === "kingbase") && !request.schema ? columns.find((column) => column.resolved_schema)?.resolved_schema : request.schema;
         return {
@@ -291,7 +295,7 @@ export function tableMetadataToDataTabMeta(metadata: TableMetadata, overrides?: 
     columns: metadata.columns,
     primaryKeys: metadata.primaryKeys,
     ...(metadata.virtualPrimaryKeys?.length ? { virtualPrimaryKeys: metadata.virtualPrimaryKeys } : {}),
-    physicalPrimaryKeys: physicalTablePrimaryKeys(metadata.columns, metadata.indexes),
+    physicalPrimaryKeys: physicalTablePrimaryKeys(metadata.columns, metadata.indexes, metadata.databaseType),
   };
 }
 
@@ -306,7 +310,9 @@ export async function loadTableIndexes(request: TableMetadataRequest): Promise<I
     if (!oldestKey) break;
     tableIndexesLoads.delete(oldestKey);
   }
-  const promise = api.listIndexes(request.connectionId, request.database, request.schema || request.currentSchema || "", request.tableName, request.catalog);
+  const promise = request.exactIdentity
+    ? api.listIndexes(request.connectionId, request.database, request.schema ?? "", request.tableName, request.catalog, true)
+    : api.listIndexes(request.connectionId, request.database, request.schema || request.currentSchema || "", request.tableName, request.catalog);
   const entry = { parts: metadataScopeParts(scope), promise, expiresAt: Date.now() + TABLE_METADATA_CACHE_TTL_MS };
   tableIndexesLoads.set(scopeKey, entry);
   void promise.catch(() => {
@@ -356,19 +362,31 @@ export async function loadTableMetadata(request: TableMetadataRequest): Promise<
         };
         const indexesPromise = resolveReportedSchema || resolveSynonymTarget ? undefined : loadTableIndexes(request).catch(() => undefined);
         const columnsResult = await columnsPromise;
-        const columns = columnsResult.columns;
+        let columns = columnsResult.columns;
         const resolvedTarget = columns.find((column) => column.resolved_table);
         const resolvedSchema = resolveReportedSchema ? columns.find((column) => column.resolved_schema)?.resolved_schema : request.schema;
         const indexRequest = { ...request, schema: resolvedTarget?.resolved_schema ?? (resolvedSchema || request.currentSchema), tableName: resolvedTarget?.resolved_table ?? request.tableName };
         const loadedIndexes = columns.length > 0 ? await ((!resolvedTarget && indexesPromise) || loadTableIndexes(indexRequest).catch(() => undefined)) : [];
         const indexes = loadedIndexes ?? indexFailure();
-        const primaryKeys = editableRowIdentifierColumns(request.databaseType as DatabaseType, columns, indexes, columnsResult.tableType);
+        let primaryKeys = editableRowIdentifierColumns(request.databaseType as DatabaseType, columns, indexes, columnsResult.tableType);
+        // Doris/StarRocks UNIQUE KEY columns are NULLable and never reported as
+        // primary keys, yet they are the engine's key. Surface them through
+        // `is_unique` only: the data generator, CREATE/DDL export, transfer and the
+        // ER diagram read `is_primary_key` as a literal PRIMARY KEY, and `columns`
+        // may reference the cached columns facet, so rewriting the flag would leak
+        // into those paths and into every later metadata load.
+        const keyColumns = uniqueKeyModelColumns(request.databaseType as DatabaseType, indexes);
+        if (keyColumns.size > 0) {
+          if (primaryKeys.length === 0) primaryKeys = columns.filter((column) => keyColumns.has(column.name.toLowerCase())).map((column) => column.name);
+          columns = columns.map((column) => (keyColumns.has(column.name.toLowerCase()) && !column.is_unique ? { ...column, is_unique: true } : column));
+        }
         return {
           schema: resolvedSchema || undefined,
           tableName: request.tableName,
           tableType: columnsResult.tableType,
           catalog: request.catalog,
           database: request.database,
+          databaseType: request.databaseType as DatabaseType,
           columns,
           indexes,
           primaryKeys,

@@ -316,6 +316,10 @@ impl SqlDialectProfile {
             };
         }
 
+        if matches!(db_type, DatabaseType::Jdbc | DatabaseType::Hive) {
+            return Self { supports_oracle_style_routine_bodies: true, ..Self::default() };
+        }
+
         Self::default()
     }
 
@@ -445,6 +449,17 @@ impl SqlParsingOptions {
     }
 
     pub fn for_database_type_and_compatibility(db_type: DatabaseType, compatibility_mode: Option<&str>) -> Self {
+        if db_type == DatabaseType::Kingbase {
+            let mode = compatibility_mode.unwrap_or_default().trim().to_ascii_lowercase();
+            return Self::from_profile(match mode.as_str() {
+                "mysql" => SqlDialectProfile::mysql_compatible(),
+                "sqlserver" => SqlDialectProfile::sql_server(),
+                "pg" | "postgres" | "postgresql" => SqlDialectProfile::postgres_family(),
+                // Preserve PL/SQL blocks while mode detection is unavailable;
+                // the GaussDB profile also preserves dollar-quoted routines.
+                _ => SqlDialectProfile::gaussdb(),
+            });
+        }
         if db_type == DatabaseType::OpenGauss {
             return match compatibility_mode.map(str::trim) {
                 // openGauss stores package specs/bodies as PL/SQL regardless of
@@ -1129,7 +1144,7 @@ fn is_identifier_continue_char(ch: char) -> bool {
 }
 
 /// Whether the text before a quote ends in an Oracle `q`/`nq` introducer token.
-fn ends_with_oracle_q_quote_prefix(text: &str) -> bool {
+pub(crate) fn ends_with_oracle_q_quote_prefix(text: &str) -> bool {
     let mut chars = text.chars().rev();
     if !matches!(chars.next(), Some('q' | 'Q')) {
         return false;
@@ -1157,7 +1172,7 @@ fn oracle_q_quote_closer(opening: char) -> Option<char> {
 
 /// Byte index just past the closing quote of the `q'...'` literal whose opening
 /// quote sits at `quote_index`, or `None` when the literal is not well formed.
-fn oracle_q_quote_end(sql: &str, quote_index: usize) -> Option<usize> {
+pub(crate) fn oracle_q_quote_end(sql: &str, quote_index: usize) -> Option<usize> {
     let opening = next_char_at(sql, quote_index + 1)?;
     let closer = oracle_q_quote_closer(opening)?;
     let content_start = quote_index + 1 + opening.len_utf8();
@@ -1168,6 +1183,35 @@ fn oracle_q_quote_end(sql: &str, quote_index: usize) -> Option<usize> {
 
 pub fn split_sql_statements(sql: &str) -> Vec<String> {
     split_sql_statements_with_options(sql, SqlParsingOptions::default())
+}
+
+#[cfg(test)]
+#[test]
+fn kingbase_compatibility_profiles_preserve_routine_and_batch_boundaries() {
+    for (mode, db_type, sql) in [
+        ("oracle", DatabaseType::Gaussdb, "BEGIN\n NULL;\n NULL;\nEND;\n/\nSELECT 1;"),
+        (
+            "mysql",
+            DatabaseType::Mysql,
+            "DELIMITER $$\nCREATE PROCEDURE p() BEGIN SELECT 1; SELECT 2; END$$\nDELIMITER ;\nSELECT 3;",
+        ),
+        (
+            "pg",
+            DatabaseType::Postgres,
+            "CREATE FUNCTION f() RETURNS int AS $$ BEGIN RETURN 1; END; $$ LANGUAGE plpgsql; SELECT 2;",
+        ),
+        (
+            "sqlserver",
+            DatabaseType::SqlServer,
+            "CREATE PROCEDURE p AS\nBEGIN\n SELECT 1;\n SELECT 2;\nEND\nGO\nSELECT 3;",
+        ),
+    ] {
+        assert_eq!(
+            split_sql_statements_for_database_with_compatibility(sql, DatabaseType::Kingbase, Some(mode)),
+            split_sql_statements_for_database(sql, db_type),
+            "Kingbase mode {mode}"
+        );
+    }
 }
 
 pub fn split_sql_statements_for_database(sql: &str, db_type: DatabaseType) -> Vec<String> {
@@ -3038,7 +3082,7 @@ fn starts_with_postgres_dollar_quoted_routine_prefix(sql: &str) -> bool {
         && block.tokens.iter().rev().find_map(OraclePlSqlToken::as_word) == Some("AS")
 }
 
-fn oracle_plsql_block_is_complete(sql: &str) -> bool {
+pub(crate) fn oracle_plsql_block_is_complete(sql: &str) -> bool {
     OraclePlSqlBlock::parse(sql).is_complete()
 }
 
@@ -3319,6 +3363,18 @@ impl OraclePlSqlBlock {
         // at the declaration's `END;` and cut the main query off the statement.
         if self.starts_with_function_declaration() {
             return self.with_function_is_complete();
+        }
+
+        if self.tokens.first().is_some_and(|token| token.is_word("CREATE")) {
+            let object = Self::skip_create_modifiers(&self.tokens[1..]);
+            if object.first().is_some_and(|token| token.is_word("TRIGGER"))
+                && object
+                    .iter()
+                    .find(|token| token.is_any_word(&["BEGIN", "DECLARE", "COMPOUND", "CALL"]))
+                    .is_some_and(|token| token.is_word("CALL"))
+            {
+                return self.tokens.last().is_some_and(OraclePlSqlToken::is_semicolon);
+            }
         }
 
         // Package/type specifications have declarations and an outer END with
@@ -5238,6 +5294,15 @@ SELECT 2;";
         assert_eq!(firebird, SqlDialectProfile::firebird());
         assert!(firebird.supports_firebird_routine_blocks);
         assert!(!firebird.supports_backslash_escaped_quotes);
+
+        for db_type in [DatabaseType::Jdbc, DatabaseType::Hive] {
+            let profile = SqlDialectProfile::for_database_type(db_type);
+            assert!(profile.supports_oracle_style_routine_bodies);
+            assert!(!profile.supports_oracle_plsql_blocks);
+            assert!(!profile.supports_mysql_routine_blocks);
+            assert!(!profile.supports_slash_line_block_delimiter);
+            assert!(profile.supports_backslash_escaped_quotes);
+        }
     }
 
     #[test]
@@ -5487,6 +5552,24 @@ SELECT 2 FROM RDB$DATABASE;";
     }
 
     #[test]
+    fn oracle_split_ends_call_trigger_before_following_ddl() {
+        let trigger = "CREATE OR REPLACE TRIGGER \"S\".\"TR\" BEFORE INSERT ON \"S\".\"T\" FOR EACH ROW CALL \"S\".\"P\"(:NEW.ID, 'a;b');";
+        for database in [DatabaseType::Oracle, DatabaseType::OceanbaseOracle] {
+            for separator in ["\n", "\n/\n"] {
+                let sql = format!("{trigger}{separator}ALTER TRIGGER \"S\".\"TR\" DISABLE; COMMENT ON TABLE \"S\".\"T\" IS 'unchanged';");
+                assert_eq!(
+                    split_sql_statements_for_database(&sql, database),
+                    vec![
+                        trigger.to_string(),
+                        "ALTER TRIGGER \"S\".\"TR\" DISABLE".to_string(),
+                        "COMMENT ON TABLE \"S\".\"T\" IS 'unchanged'".to_string()
+                    ]
+                );
+            }
+        }
+    }
+
+    #[test]
     fn oracle_split_keeps_compound_trigger_together() {
         let trigger = "\
 CREATE OR REPLACE EDITIONABLE TRIGGER \"A\".\"T\" FOR INSERT OR UPDATE ON \"A\".\"X\" COMPOUND TRIGGER
@@ -5690,6 +5773,84 @@ END;";
 
         assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Argo), vec![sql.to_string()]);
         assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Transwarp), vec![sql.to_string()]);
+        assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Jdbc), vec![sql.to_string()]);
+        assert_eq!(split_sql_statements_for_database(sql, DatabaseType::Hive), vec![sql.to_string()]);
+    }
+
+    #[test]
+    fn jdbc_and_hive_keep_procedure_statement_ranges_intact() {
+        let sql = "\
+CREATE OR REPLACE PROCEDURE pro_cbs_check_his(is_date IN VARCHAR(8))
+IS
+BEGIN
+    DELETE FROM transwarp.tmp_cbs_t00_corp_cust_his
+    WHERE data_date = is_date;
+
+    INSERT INTO transwarp.tmp_cbs_t00_corp_cust_his
+    SELECT * FROM transwarp.cbs_t00_corp_cust_his
+    WHERE data_date = is_date;
+
+    COMMIT;
+END;";
+
+        let sql_as = "\
+CREATE OR REPLACE PROCEDURE pro_cbs_check_his(is_date IN VARCHAR(8))
+AS
+BEGIN
+    DELETE FROM transwarp.tmp_cbs_t00_corp_cust_his
+    WHERE data_date = is_date;
+
+    COMMIT;
+END;";
+
+        for db_type in [DatabaseType::Jdbc, DatabaseType::Hive, DatabaseType::Argo, DatabaseType::Transwarp] {
+            let statements = split_sql_statements_for_database(sql, db_type);
+            assert_eq!(statements, vec![sql.to_string()], "failed for {db_type:?}");
+            let statements_as = split_sql_statements_for_database(sql_as, db_type);
+            assert_eq!(statements_as, vec![sql_as.to_string()], "failed for {db_type:?}");
+        }
+    }
+
+    #[test]
+    fn jdbc_and_hive_split_hiveql_functions_with_string_body() {
+        let sql_basic = "\
+CREATE FUNCTION my_udf AS 'com.example.Mask';
+SELECT mask_fn(x) FROM t;";
+
+        let sql_if_not_exists = "\
+CREATE FUNCTION IF NOT EXISTS my_udf AS 'com.example.Mask';
+SELECT mask_fn(x) FROM t;";
+
+        let sql_temporary = "\
+CREATE TEMPORARY FUNCTION my_udf AS 'com.example.Mask';
+SELECT mask_fn(x) FROM t;";
+
+        for db_type in [DatabaseType::Jdbc, DatabaseType::Hive] {
+            assert_eq!(
+                split_sql_statements_for_database(sql_basic, db_type),
+                vec![
+                    "CREATE FUNCTION my_udf AS 'com.example.Mask'".to_string(),
+                    "SELECT mask_fn(x) FROM t".to_string(),
+                ],
+                "failed for {db_type:?}"
+            );
+            assert_eq!(
+                split_sql_statements_for_database(sql_if_not_exists, db_type),
+                vec![
+                    "CREATE FUNCTION IF NOT EXISTS my_udf AS 'com.example.Mask'".to_string(),
+                    "SELECT mask_fn(x) FROM t".to_string(),
+                ],
+                "failed for {db_type:?}"
+            );
+            assert_eq!(
+                split_sql_statements_for_database(sql_temporary, db_type),
+                vec![
+                    "CREATE TEMPORARY FUNCTION my_udf AS 'com.example.Mask'".to_string(),
+                    "SELECT mask_fn(x) FROM t".to_string(),
+                ],
+                "failed for {db_type:?}"
+            );
+        }
     }
 
     #[test]
