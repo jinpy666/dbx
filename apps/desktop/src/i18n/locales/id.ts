@@ -4050,6 +4050,7 @@ export default withEnglishFallback({
     copyDsn: "DSN (key=value)",
     copyDsnWithPassword: "DSN (dengan kata sandi)",
     copyPsqlCommand: "Perintah psql",
+    copyPasswordText: "Kata sandi (teks biasa)",
     copyPasswordConfirmTitle: "Salin dengan Kata Sandi",
     copyPasswordConfirmMessage: "Teks yang disalin akan berisi kata sandi tersimpan dalam teks biasa. Lanjutkan?",
     copyPasswordConfirmAction: "Salin",

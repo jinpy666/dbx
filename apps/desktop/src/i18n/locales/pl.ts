@@ -4119,6 +4119,7 @@ export default withEnglishFallback({
     copyDsn: "DSN (klucz=wartość)",
     copyDsnWithPassword: "DSN (z hasłem)",
     copyPsqlCommand: "Polecenie psql",
+    copyPasswordText: "Hasło (jawny tekst)",
     copyPasswordConfirmTitle: "Kopiuj z hasłem",
     copyPasswordConfirmMessage: "Skopiowany tekst będzie zawierał zapisane hasło w postaci jawnej. Kontynuować?",
     copyPasswordConfirmAction: "Kopiuj",
