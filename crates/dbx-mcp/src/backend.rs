@@ -310,6 +310,16 @@ pub trait DbxBackend: Send + Sync {
     }
 
     async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String>;
+
+    /// Whether the user has saved any MCP policy. Fresh installs have none,
+    /// in which case writable plugin connections fall back to their own
+    /// protection level (at least write) instead of the global default. Once
+    /// a policy is saved, its explicit settings are authoritative everywhere.
+    /// Unreadable storage counts as configured: unreadable hides, never widens.
+    async fn mcp_policy_configured(&self) -> bool {
+        false
+    }
+
     async fn save_history_entry(&self, entry: &HistoryEntry) -> Result<(), String> {
         let _ = entry;
         Err("Query history is not supported by this backend.".to_string())
@@ -1296,6 +1306,10 @@ impl DbxBackend for LocalBackend {
 
     async fn load_mcp_access_policy(&self) -> Result<dbx_core::mcp_access::McpAccessPolicy, String> {
         self.state.storage.load_mcp_access_policy().await.map(effective_mcp_access_policy)
+    }
+
+    async fn mcp_policy_configured(&self) -> bool {
+        self.state.storage.load_enforced_mcp_policy().await.map(|state| state.configured).unwrap_or(true)
     }
 
     async fn list_plugin_mcp_tools(&self) -> Result<Vec<crate::plugin_tools::PluginToolProvider>, String> {

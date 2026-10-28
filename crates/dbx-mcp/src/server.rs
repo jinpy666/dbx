@@ -2229,6 +2229,7 @@ impl DbxMcpServer {
             Ok(allowed) => allowed,
             Err(error) => return error,
         };
+        let read_only_by_connection = self.plugin_connection_read_only().await.unwrap_or_default();
         if self.scope.enabled() && allowed_connections.is_empty() {
             return tool_error(
                 "PLUGIN_OUT_OF_SCOPE",
@@ -2243,12 +2244,24 @@ impl DbxMcpServer {
         let connection_hidden = owned
             .iter()
             .filter(|entry| {
-                !plugin_entry_has_allowed_connection(access.as_ref(), group_paths.as_ref(), entry, &allowed_connections)
+                !plugin_entry_has_allowed_connection(
+                    access.as_ref(),
+                    group_paths.as_ref(),
+                    entry,
+                    &allowed_connections,
+                    &read_only_by_connection,
+                )
             })
             .count();
         hidden += connection_hidden;
         owned.retain(|entry| {
-            plugin_entry_has_allowed_connection(access.as_ref(), group_paths.as_ref(), entry, &allowed_connections)
+            plugin_entry_has_allowed_connection(
+                access.as_ref(),
+                group_paths.as_ref(),
+                entry,
+                &allowed_connections,
+                &read_only_by_connection,
+            )
         });
         if owned.is_empty() {
             // An all-allowlist-hidden plugin, a plugin with no usable
@@ -2273,6 +2286,7 @@ impl DbxMcpServer {
                             group_paths.get(connection_id).map(|path| path.ids.as_slice()).unwrap_or(&[]),
                             entry,
                             connection_id,
+                            read_only_by_connection.get(connection_id).copied(),
                         )
                     })
                     .cloned()
@@ -5050,7 +5064,7 @@ impl DbxMcpServer {
             .await
             .map_err(|error| backend_tool_error("MCP_POLICY_UNAVAILABLE", error))?;
         if entry.scope.is_none() && connection_id.is_none() {
-            return ensure_plugin_scope(&access, entry, &[], None, arguments);
+            return ensure_plugin_scope(&access, entry, &[], None, None, arguments);
         }
         let policy = self.load_policy().await?;
         let group_paths = self
@@ -5059,7 +5073,18 @@ impl DbxMcpServer {
             .map_err(|error| backend_tool_error("MCP_POLICY_UNAVAILABLE", error))?;
         let group_ids =
             connection_id.and_then(|id| group_paths.get(id)).map(|path| path.ids.clone()).unwrap_or_default();
-        ensure_plugin_scope(&access, entry, &group_ids, connection_id, arguments)
+        // The connection's own protection level feeds the plugin-connection
+        // default (writable plugin connections resolve to at least write when
+        // no explicit rule says otherwise). The default only applies to fresh
+        // installs: once the user saves any MCP policy, its explicit settings
+        // are authoritative. Unknown facts keep the plain policy default.
+        let connection_read_only = match connection_id {
+            Some(id) if !self.backend.mcp_policy_configured().await => {
+                self.plugin_connection_read_only().await.ok().and_then(|read_only| read_only.get(id).copied())
+            }
+            _ => None,
+        };
+        ensure_plugin_scope(&access, entry, &group_ids, connection_id, connection_read_only, arguments)
     }
 
     /// The advertised `tools/list` view: router-enabled tools narrowed to the
@@ -5410,6 +5435,7 @@ impl DbxMcpServer {
         let entries = crate::plugin_tools::build_catalog(&providers);
         // Tool calls fail closed on policy errors anyway; keep the view.
         let allowed = self.allowed_plugin_connections().await.unwrap_or_default();
+        let read_only_by_connection = self.plugin_connection_read_only().await.unwrap_or_default();
         let access = self.backend.load_mcp_access_policy().await.ok();
         let policy = policy.cloned();
         let group_paths = match policy.as_ref() {
@@ -5424,7 +5450,13 @@ impl DbxMcpServer {
                     return None;
                 }
                 let connections = allowed.get(&entry.plugin_id).cloned().unwrap_or_default();
-                if !plugin_entry_has_allowed_connection(access.as_ref(), group_paths.as_ref(), &entry, &connections) {
+                if !plugin_entry_has_allowed_connection(
+                    access.as_ref(),
+                    group_paths.as_ref(),
+                    &entry,
+                    &connections,
+                    &read_only_by_connection,
+                ) {
                     return None;
                 }
                 let connections = match (&access, &group_paths) {
@@ -5436,6 +5468,7 @@ impl DbxMcpServer {
                                 group_paths.get(connection_id).map(|path| path.ids.as_slice()).unwrap_or(&[]),
                                 &entry,
                                 connection_id,
+                                read_only_by_connection.get(connection_id).copied(),
                             )
                         })
                         .collect(),
@@ -5558,6 +5591,7 @@ impl DbxMcpServer {
         // Listing degrades on policy errors the same way the flat view does;
         // `dbx_plugin_tools`/`dbx_plugin_call` still fail closed.
         let allowed = self.allowed_plugin_connections().await.unwrap_or_default();
+        let read_only_by_connection = self.plugin_connection_read_only().await.unwrap_or_default();
         let policy = self.load_policy().await.ok();
         let access = self.backend.load_mcp_access_policy().await.ok();
         let group_paths = match policy.as_ref() {
@@ -5598,6 +5632,7 @@ impl DbxMcpServer {
                             group_paths.as_ref(),
                             entry,
                             connections,
+                            &read_only_by_connection,
                         )
                 })
                 .collect::<Vec<_>>();
@@ -5615,6 +5650,7 @@ impl DbxMcpServer {
                                     group_paths.get(connection_id).map(|path| path.ids.as_slice()).unwrap_or(&[]),
                                     entry,
                                     connection_id,
+                                    read_only_by_connection.get(connection_id).copied(),
                                 ),
                                 _ => true,
                             }
@@ -5632,6 +5668,21 @@ impl DbxMcpServer {
     async fn allowed_plugin_connections_for(&self, plugin_id: &str) -> Result<Vec<(String, String)>, CallToolResult> {
         let allowed = self.allowed_plugin_connections().await?;
         Ok(allowed.get(plugin_id).cloned().unwrap_or_default())
+    }
+
+    /// Read-only flag per plugin connection. Feeds the plugin-connection
+    /// access default (writable plugin connections resolve to at least write
+    /// when no explicit rule says otherwise) on both the listing and the call
+    /// path so a tool never advertises where it cannot run, and never hides
+    /// where it can.
+    async fn plugin_connection_read_only(&self) -> Result<HashMap<String, bool>, CallToolResult> {
+        let connections =
+            self.backend.load_connections().await.map_err(|error| tool_error("CONNECTION_LOAD_ERROR", error))?;
+        Ok(connections
+            .into_iter()
+            .filter(|config| config.plugin_id.as_deref().is_some_and(|id| !id.trim().is_empty()))
+            .map(|config| (config.id, config.read_only))
+            .collect())
     }
 
     /// Shared call core for `dbx_plugin_call`: locates the tool by
@@ -6325,8 +6376,21 @@ fn plugin_connection_level_allowed(
     group_ids: &[String],
     entry: &crate::plugin_tools::PluginToolEntry,
     connection_id: &str,
+    connection_read_only: Option<bool>,
 ) -> bool {
     let required = plugin_tool_required_access(entry);
+    // Scope-less entries resolve directly so the plugin-connection default
+    // (writable plugin connections count as write) applies to the listing
+    // exactly as it does at call time. Scope-bound entries keep the
+    // sub-scope-aware check.
+    if entry.scope.is_none() {
+        let resolved = match connection_read_only {
+            Some(read_only) => access.resolve_plugin_connection(group_ids, connection_id, read_only),
+            None => access.resolve(group_ids, connection_id, None),
+        };
+        let ceiling = access.toolset_ceiling(connection_id, &entry.toolset);
+        return resolved.visible && ceiling.map_or(resolved.level, |c| resolved.level.min(c)) >= required;
+    }
     let scopes = entry.scope.as_ref().map(|(kind, _)| [kind.as_str()]);
     connection_has_tool_access(
         access,
@@ -6354,6 +6418,7 @@ fn plugin_entry_has_allowed_connection(
     group_paths: Option<&HashMap<String, dbx_core::mcp_policy::McpConnectionGroupPath>>,
     entry: &crate::plugin_tools::PluginToolEntry,
     connections: &[(String, String)],
+    read_only_by_connection: &HashMap<String, bool>,
 ) -> bool {
     if !entry.requires_connection() {
         return access.is_none_or(|access| access.default_access >= plugin_tool_required_access(entry));
@@ -6368,6 +6433,7 @@ fn plugin_entry_has_allowed_connection(
                 group_paths.get(connection_id).map(|path| path.ids.as_slice()).unwrap_or(&[]),
                 entry,
                 connection_id,
+                read_only_by_connection.get(connection_id).copied(),
             )
         }),
         _ => true,
@@ -6384,6 +6450,7 @@ fn ensure_plugin_scope(
     entry: &crate::plugin_tools::PluginToolEntry,
     group_ids: &[String],
     connection_id: Option<&str>,
+    connection_read_only: Option<bool>,
     arguments: &serde_json::Value,
 ) -> Result<dbx_core::mcp_access::McpAccessLevel, CallToolResult> {
     let Some(connection_id) = connection_id else {
@@ -6393,10 +6460,16 @@ fn ensure_plugin_scope(
                 format!("Plugin tool \"{}\" requires a policy-bound connection.", entry.exposed_name),
             ));
         }
-        if access.default_access < plugin_tool_required_access(entry) {
+        let needed = plugin_tool_required_access(entry);
+        if access.default_access < needed {
             return Err(tool_error(
                 "MCP_READ_ONLY",
-                format!("Plugin tool \"{}\" is above the effective DBX MCP access level.", entry.exposed_name),
+                format!(
+                    "Plugin tool \"{}\" needs {} access but the global default is {}. Raise the connection's access level in DBX Settings → MCP, or call it with an authorized connectionId.",
+                    entry.exposed_name,
+                    access_level_name(needed),
+                    access_level_name(access.default_access)
+                ),
             ));
         }
         return Ok(access.default_access);
@@ -6425,7 +6498,10 @@ fn ensure_plugin_scope(
             }
         }
     } else {
-        access.resolve(group_ids, connection_id, None)
+        match connection_read_only {
+            Some(read_only) => access.resolve_plugin_connection(group_ids, connection_id, read_only),
+            None => access.resolve(group_ids, connection_id, None),
+        }
     };
     if !resolved.visible {
         return Err(tool_error(
@@ -6436,10 +6512,26 @@ fn ensure_plugin_scope(
     if cap(resolved.level) < needed {
         return Err(tool_error(
             "MCP_READ_ONLY",
-            format!("Plugin tool \"{}\" is above the effective DBX MCP access level.", entry.exposed_name),
+            format!(
+                "Plugin tool \"{}\" needs {} access; connection \"{}\" resolves to {} in the DBX MCP settings. Raise that connection's access level in DBX Settings → MCP.",
+                entry.exposed_name,
+                access_level_name(needed),
+                connection_id,
+                access_level_name(resolved.level)
+            ),
         ));
     }
     Ok(cap(resolved.level))
+}
+
+/// Lowercase stable names for error messages and audits.
+fn access_level_name(level: dbx_core::mcp_access::McpAccessLevel) -> &'static str {
+    match level {
+        dbx_core::mcp_access::McpAccessLevel::None => "none",
+        dbx_core::mcp_access::McpAccessLevel::Read => "read",
+        dbx_core::mcp_access::McpAccessLevel::Write => "write",
+        dbx_core::mcp_access::McpAccessLevel::Full => "full",
+    }
 }
 
 /// The exposed tool is declared `full`: `exposed_tools` rewrites
@@ -7661,6 +7753,7 @@ mod tests {
     struct FakeBackend {
         connections: Vec<ConnectionConfig>,
         policy: McpGlobalPolicy,
+        mcp_policy_configured: bool,
         recorded_arguments: std::sync::Mutex<Vec<(String, serde_json::Value)>>,
         history: std::sync::Mutex<Vec<dbx_core::history::HistoryEntry>>,
         closed_sessions: std::sync::Mutex<Vec<String>>,
@@ -7699,6 +7792,7 @@ mod tests {
             Self {
                 connections: Vec::new(),
                 policy: McpGlobalPolicy::default(),
+                mcp_policy_configured: true,
                 recorded_arguments: std::sync::Mutex::new(Vec::new()),
                 history: std::sync::Mutex::new(Vec::new()),
                 closed_sessions: std::sync::Mutex::new(Vec::new()),
@@ -8075,6 +8169,10 @@ mod tests {
         }
         async fn load_mcp_global_policy(&self) -> Result<McpGlobalPolicy, String> {
             Ok(self.policy_override.lock().unwrap().clone().unwrap_or_else(|| self.policy.clone()))
+        }
+
+        async fn mcp_policy_configured(&self) -> bool {
+            self.mcp_policy_configured
         }
 
         async fn load_mcp_access_policy(&self) -> Result<dbx_core::mcp_access::McpAccessPolicy, String> {
@@ -9598,9 +9696,45 @@ mod tests {
                 McpRuleTarget::Scope { connection_id: "k1".into(), scope: "namespace".into(), value: "prod".into() },
                 rule,
             );
-            let error = ensure_plugin_scope(&access, &entry, &[], Some("k1"), &json!({})).unwrap_err();
+            let error = ensure_plugin_scope(&access, &entry, &[], Some("k1"), None, &json!({})).unwrap_err();
             assert!(result_text(&error).contains("SCOPE_REQUIRED"));
         }
+    }
+
+    #[test]
+    fn writable_plugin_connections_default_to_write_without_explicit_rules() {
+        use dbx_core::mcp_access::{McpAccessLevel, McpAccessPolicy, McpAccessRule, McpRuleTarget};
+        let provider = plugin_provider("io.dbx.ssh", "Terminal", json!({"tools": [{"name": "exec"}]}));
+        let entry = crate::plugin_tools::build_catalog(&[provider]).remove(0);
+        let access = McpAccessPolicy::default(); // default_access: Read
+
+        // No rule + writable plugin connection: the connection's own
+        // protection level replaces the global read default.
+        let level = ensure_plugin_scope(&access, &entry, &[], Some("c1"), Some(false), &json!({})).unwrap();
+        assert_eq!(level, McpAccessLevel::Write);
+
+        // Read-only plugin connection keeps the read default.
+        let error = ensure_plugin_scope(&access, &entry, &[], Some("c1"), Some(true), &json!({})).unwrap_err();
+        assert!(result_text(&error).contains("MCP_READ_ONLY"), "{}", result_text(&error));
+
+        // Unknown facts (older call paths) keep the plain policy default.
+        let error = ensure_plugin_scope(&access, &entry, &[], Some("c1"), None, &json!({})).unwrap_err();
+        assert!(result_text(&error).contains("MCP_READ_ONLY"), "{}", result_text(&error));
+
+        // An explicit connection rule always wins over the default.
+        let mut explicit = McpAccessPolicy::default();
+        explicit.rules.insert(
+            McpRuleTarget::Connection { id: "c1".into() },
+            McpAccessRule { access: Some(McpAccessLevel::Read), ..Default::default() },
+        );
+        let error = ensure_plugin_scope(&explicit, &entry, &[], Some("c1"), Some(false), &json!({})).unwrap_err();
+        assert!(result_text(&error).contains("resolves to read"), "{}", result_text(&error));
+        explicit.rules.insert(
+            McpRuleTarget::Connection { id: "c1".into() },
+            McpAccessRule { access: Some(McpAccessLevel::Full), ..Default::default() },
+        );
+        let level = ensure_plugin_scope(&explicit, &entry, &[], Some("c1"), Some(false), &json!({})).unwrap();
+        assert_eq!(level, McpAccessLevel::Full);
     }
 
     #[tokio::test]
