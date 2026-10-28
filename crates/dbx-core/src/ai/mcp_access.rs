@@ -1634,7 +1634,7 @@ mod plugin_tools_mode_tests {
 
     #[test]
     fn plugin_tools_mode_serializes_lowercase_and_tolerates_unknown_values() {
-        assert_eq!(serde_json::to_value(&McpPluginToolsMode::Flat).unwrap(), serde_json::json!("flat"));
+        assert_eq!(serde_json::to_value(McpPluginToolsMode::Flat).unwrap(), serde_json::json!("flat"));
         assert_eq!(
             serde_json::from_value::<McpPluginToolsMode>(serde_json::json!("flat")).unwrap(),
             McpPluginToolsMode::Flat
