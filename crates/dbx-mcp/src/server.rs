@@ -2229,7 +2229,7 @@ impl DbxMcpServer {
             Ok(allowed) => allowed,
             Err(error) => return error,
         };
-        let read_only_by_connection = self.plugin_connection_read_only().await.unwrap_or_default();
+        let read_only_by_connection = self.plugin_connection_read_only_if_unconfigured().await;
         if self.scope.enabled() && allowed_connections.is_empty() {
             return tool_error(
                 "PLUGIN_OUT_OF_SCOPE",
@@ -5077,12 +5077,15 @@ impl DbxMcpServer {
         // default (writable plugin connections resolve to at least write when
         // no explicit rule says otherwise). The default only applies to fresh
         // installs: once the user saves any MCP policy, its explicit settings
-        // are authoritative. Unknown facts keep the plain policy default.
+        // are authoritative. The same configured-aware map the listings use
+        // keeps advertised visibility and call decisions identical. Unknown
+        // facts keep the plain policy default.
         let connection_read_only = match connection_id {
-            Some(id) if !self.backend.mcp_policy_configured().await => {
-                self.plugin_connection_read_only().await.ok().and_then(|read_only| read_only.get(id).copied())
+            Some(id) => {
+                let read_only_by_connection = self.plugin_connection_read_only_if_unconfigured().await;
+                read_only_by_connection.get(id).copied()
             }
-            _ => None,
+            None => None,
         };
         ensure_plugin_scope(&access, entry, &group_ids, connection_id, connection_read_only, arguments)
     }
@@ -5435,7 +5438,7 @@ impl DbxMcpServer {
         let entries = crate::plugin_tools::build_catalog(&providers);
         // Tool calls fail closed on policy errors anyway; keep the view.
         let allowed = self.allowed_plugin_connections().await.unwrap_or_default();
-        let read_only_by_connection = self.plugin_connection_read_only().await.unwrap_or_default();
+        let read_only_by_connection = self.plugin_connection_read_only_if_unconfigured().await;
         let access = self.backend.load_mcp_access_policy().await.ok();
         let policy = policy.cloned();
         let group_paths = match policy.as_ref() {
@@ -5591,7 +5594,7 @@ impl DbxMcpServer {
         // Listing degrades on policy errors the same way the flat view does;
         // `dbx_plugin_tools`/`dbx_plugin_call` still fail closed.
         let allowed = self.allowed_plugin_connections().await.unwrap_or_default();
-        let read_only_by_connection = self.plugin_connection_read_only().await.unwrap_or_default();
+        let read_only_by_connection = self.plugin_connection_read_only_if_unconfigured().await;
         let policy = self.load_policy().await.ok();
         let access = self.backend.load_mcp_access_policy().await.ok();
         let group_paths = match policy.as_ref() {
@@ -5683,6 +5686,20 @@ impl DbxMcpServer {
             .filter(|config| config.plugin_id.as_deref().is_some_and(|id| !id.trim().is_empty()))
             .map(|config| (config.id, config.read_only))
             .collect())
+    }
+
+    /// The configured-aware plugin-connection read-only map: the single
+    /// source every listing and the call path share. The write-widening
+    /// default only applies to fresh installs — once the user saves any MCP
+    /// policy its explicit settings are authoritative, so the map stays empty
+    /// and resolution falls back to the plain policy default on listings and
+    /// calls alike. Backends map unreadable storage to configured, so this
+    /// fails closed (never widens) there too.
+    async fn plugin_connection_read_only_if_unconfigured(&self) -> HashMap<String, bool> {
+        if self.backend.mcp_policy_configured().await {
+            return HashMap::new();
+        }
+        self.plugin_connection_read_only().await.unwrap_or_default()
     }
 
     /// Shared call core for `dbx_plugin_call`: locates the tool by
@@ -9735,6 +9752,61 @@ mod tests {
         );
         let level = ensure_plugin_scope(&explicit, &entry, &[], Some("c1"), Some(false), &json!({})).unwrap();
         assert_eq!(level, McpAccessLevel::Full);
+    }
+
+    #[tokio::test]
+    async fn saved_policy_keeps_plugin_write_tools_out_of_every_listing() {
+        // A saved policy with a read default must stay authoritative on every
+        // surface: the write-widening plugin-connection default (writable
+        // connection => at least write) only applies to fresh installs with
+        // no saved policy. Here the connection IS writable, so the raw map
+        // would widen — the listings must not advertise what the call denies.
+        let backend = |configured: bool| {
+            Arc::new(FakeBackend {
+                connections: vec![plugin_connection("k1", "prod", "io.dbx.kafka")],
+                // A saved read-default policy: from_v1 maps read_only => Read.
+                policy: McpGlobalPolicy { read_only: true, ..Default::default() },
+                plugin_providers: vec![plugin_provider("io.dbx.kafka", "Kafka Studio", kafka_plugin_listing())],
+                mcp_policy_configured: configured,
+                ..Default::default()
+            })
+        };
+
+        // Saved policy: the write-tier tool disappears from the flat
+        // tools/list and the call denies it, while the read-only one stays.
+        let server = DbxMcpServer::with_runtime_options(backend(true), McpScope::default(), false);
+        let names =
+            server.policy_filtered_tools().await.into_iter().map(|tool| tool.name.to_string()).collect::<HashSet<_>>();
+        assert!(!names.contains("dbx_kafka__kafka_topics_delete"), "flat listing must not widen: {names:?}");
+        assert!(names.contains("dbx_kafka__kafka_topics_list"), "read-only tool stays visible: {names:?}");
+
+        let list = server.plugin_list(Parameters(PluginListRequest { filter: None })).await;
+        let text = result_text(&list);
+        assert!(text.contains("1 tool(s)"), "dbx_plugin_list counts only the read tool: {text}");
+
+        let tools = server.plugin_tools(Parameters(PluginToolsRequest { plugin_id: "io.dbx.kafka".into() })).await;
+        let text = result_text(&tools);
+        assert!(!text.contains("kafka_topics_delete"), "dbx_plugin_tools must not widen: {text}");
+        assert!(text.contains("kafka_topics_list"), "{text}");
+
+        let call = server
+            .plugin_call(Parameters(PluginCallRequest {
+                plugin_id: "io.dbx.kafka".into(),
+                tool: "kafka_topics_delete".into(),
+                arguments: Some(json!({ "topics": ["t"] })),
+                dbx_connection: None,
+            }))
+            .await;
+        assert!(result_text(&call).contains("MCP_READ_ONLY"), "{}", result_text(&call));
+
+        // Fresh install (no saved policy): the widening default applies again
+        // and listings stay consistent with calls.
+        let server = DbxMcpServer::with_runtime_options(backend(false), McpScope::default(), false);
+        let names =
+            server.policy_filtered_tools().await.into_iter().map(|tool| tool.name.to_string()).collect::<HashSet<_>>();
+        assert!(names.contains("dbx_kafka__kafka_topics_delete"), "zero-config widening expected: {names:?}");
+        let tools = server.plugin_tools(Parameters(PluginToolsRequest { plugin_id: "io.dbx.kafka".into() })).await;
+        assert!(result_text(&tools).contains("kafka_topics_delete"), "{}", result_text(&tools));
     }
 
     #[tokio::test]
